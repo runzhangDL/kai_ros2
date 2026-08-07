@@ -1,0 +1,80 @@
+# =============================================================================
+# Deployment configuration for the standing policy.
+#
+# Safety-relevant defaults are deliberately conservative. Raise them only after
+# the robot has stood successfully on a gantry, one change at a time.
+# =============================================================================
+
+/humanoid_servo:
+  ros__parameters:
+    # ---- policy bundle -----------------------------------------------------
+    # Produced by tools/export_policy.py from stand_params.pkl + robot.xml.
+    # It carries the weights, the normalizer, the MuJoCo joint ORDER, the XML
+    # joint limits and the action scale, so none of those can drift from what
+    # was trained.
+    bundle: ""          # set by the launch file
+
+    # ---- bus ---------------------------------------------------------------
+    port: /dev/ttyTHS1
+    baudrate: 250000
+    timeout_ms: 30
+
+    # ---- control rate ------------------------------------------------------
+    # The policy was TRAINED AT 125 Hz. At 250000 baud a cycle costs roughly
+    # 6-8 ms of sync read plus ~2 ms of sync write, so 125 Hz (8 ms) is not
+    # reachable -- measure yours with:
+    #     ros2 run humanoid_deploy bus_benchmark
+    # 50 Hz leaves generous headroom for retries and jitter. Running slower
+    # than training degrades push recovery; if you want the trained behaviour,
+    # retrain with frame_skip matched to the rate you actually achieve.
+    control_rate_hz: 50.0
+
+    # ---- START HERE --------------------------------------------------------
+    # true: the entire loop runs, everything is published and logged, and not
+    # one byte is written to a servo. Verify the joint map, the IMU numbers and
+    # the arming preflight here before you ever set this false.
+    dry_run: true
+
+    # ---- IMU ---------------------------------------------------------------
+    imu_topic: /imu/data
+    # The wit_ros2_imu driver publishes acceleration in g (it scales by
+    # 16/32768) despite the field being defined as m/s^2. 'auto' measures a
+    # resting sample and decides; it refuses to run if the answer is neither.
+    accel_units: auto
+    # That same driver already calls np.radians on the gyro, so this is rad/s.
+    gyro_units: rad/s
+    # complementary | accel | quaternion -- see imu.py. 'complementary' is the
+    # only one that stays correct during a push.
+    gravity_source: complementary
+
+    # ---- safety ------------------------------------------------------------
+    limit_margin_deg: 2.0        # shrink the calibrated envelope by this much
+    ramp_s: 3.0                  # blend from the current pose into the policy
+    ramp_joint_rate: 1.0         # rad/s while ramping
+    max_joint_rate: 4.0          # rad/s once running
+    arm_tilt_deg: 12.0           # must be this upright to arm
+    fall_tilt_deg: 40.0          # sustained tilt beyond this = FALL
+    command_timeout_s: 0.20      # stale policy command = fault
+    ood_sigma: 6.0               # per-element z-score bound at arm time
+    max_temperature_c: 65
+    min_voltage_v: 9.5
+    shutdown_on_fault: false     # false keeps the node alive to REPORT the
+                                 # fault; torque is off and latched either way
+
+    # ---- servo behaviour ---------------------------------------------------
+    # Written once at arm time (RAM registers, they persist). Goal speed 0 would
+    # mean "as fast as possible", which is not what you want on a leg.
+    servo_goal_speed: 2000       # counts/s (~176 deg/s)
+    servo_acc: 30
+    velocity_filter_tau: 0.02    # s, low-pass on finite-differenced velocity
+    health_check_period_cycles: 10
+
+/humanoid_policy:
+  ros__parameters:
+    bundle: ""          # set by the launch file
+    imu_topic: /imu/data
+    accel_units: auto
+    gyro_units: rad/s
+    gravity_source: complementary
+    complementary_tau: 1.0
+    warn_ood_sigma: 8.0
