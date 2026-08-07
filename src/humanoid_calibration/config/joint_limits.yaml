@@ -1,0 +1,150 @@
+# =============================================================================
+# Joint / servo configuration for the 13-DoF humanoid.
+#
+#   *** ALL min_deg / max_deg VALUES BELOW ARE PLACEHOLDERS ***
+#   Replace them with the real mechanical limits before calibrating.
+#
+# Conventions
+#   - 0 deg  = standing pose. The link driven by the joint is vertical
+#              with respect to the ground.
+#   - min_deg / max_deg are JOINT angles relative to that zero, in degrees,
+#     already expressed in the joint's positive direction (see `direction`).
+#   - `direction` maps servo counts -> joint angle:
+#         joint_deg = direction * (raw - zero_raw) * 360 / counts_per_rev
+#     Set it to -1 for any servo mounted so that increasing counts move the
+#     joint the "wrong" way. During calibration the live readout tells you
+#     immediately if a sign is wrong (angle goes negative when you expect
+#     positive) -- fix it here and re-run that joint.
+#
+# The ORDER of the `joints` list is the order in which the calibration tool
+# walks you through the robot. Do not reorder casually: it was chosen so you
+# work bottom-up on the left leg, across the waist, then top-down on the right.
+# =============================================================================
+
+bus:
+  # Jetson Orin Nano 40-pin UART, pins 8/10 (74LVC1G125 open-drain TX + pull-up,
+  # RXD tapped off the same single wire). This circuit echoes every transmit
+  # back to us; feetech_bus.py handles that, see its module docstring.
+  # For a USB-TTL adapter instead, use /dev/ttyUSB0 -- or better, the stable
+  # /dev/serial/by-id/... path, since ttyUSB numbering moves between boots.
+  port: /dev/ttyTHS1
+
+  # All 13 servos have been reconfigured from the STS factory 1000000 down to
+  # 250000, which is what `sts_tool.py bustest` qualified as reliable for this
+  # robot's cable lengths and motor count. Re-qualify before changing it:
+  #   python3 sts_tool.py --baud 250000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13
+  baudrate: 250000
+
+  timeout_ms: 30            # how long to wait for a reply after the echo
+  retries: 2                # re-reads before a read is reported as failed
+
+servo:
+  # Register addresses confirmed against the working sts_tool.py bring-up tool.
+  model: STS3215
+  counts_per_rev: 4096      # STS/SMS series: 12-bit encoder over 360 deg
+  present_position_addr: 56 # STS3215 Present_Position register (2 bytes)
+  little_endian: true       # STS/SMS = little endian; SCS series = big endian
+  signed_position: false    # true only if the servo runs in multi-turn mode
+
+calibration:
+  # A limit counts as "reached" once the live angle is within this many degrees
+  # of the target, and has stayed there for `dwell_s` seconds. The dwell filters
+  # out single-sample noise / encoder glitches.
+  reach_tolerance_deg: 1.0
+  dwell_s: 0.20
+  # Live readout update rate. Each frame is one position read; at 250000 baud a
+  # transaction is well under a millisecond of airtime, so the servo's own
+  # response delay dominates. Drop this if the readout feels jumpy.
+  refresh_hz: 20
+  # Reads per servo during the pre-flight bus check, and the success rate below
+  # which calibration refuses to start. A flaky bus produces silently wrong
+  # limits, so this is a hard gate rather than a warning.
+  preflight_reads: 20
+  min_read_success: 1.0
+
+defaults:
+  min_deg: -90.0
+  max_deg: 90.0
+  direction: 1
+
+joints:
+  # ---- left leg (bottom-up) ------------------------------------------------
+  - name: left_ankle_pitch
+    id: 1
+    min_deg: -40.0          # PLACEHOLDER
+    max_deg: 25.0           # PLACEHOLDER
+    direction: 1
+
+  - name: left_ankle_roll
+    id: 2
+    min_deg: -25.0          # PLACEHOLDER
+    max_deg: 25.0           # PLACEHOLDER
+    direction: 1
+
+  - name: left_knee_pitch
+    id: 3
+    min_deg: 0.0            # PLACEHOLDER
+    max_deg: 120.0          # PLACEHOLDER
+    direction: 1
+
+  - name: left_hip_yaw
+    id: 4
+    min_deg: -45.0          # PLACEHOLDER
+    max_deg: 45.0           # PLACEHOLDER
+    direction: 1
+
+  - name: left_hip_roll
+    id: 5
+    min_deg: -30.0          # PLACEHOLDER
+    max_deg: 30.0           # PLACEHOLDER
+    direction: 1
+
+  - name: left_hip_pitch
+    id: 6
+    min_deg: -90.0          # PLACEHOLDER
+    max_deg: 60.0           # PLACEHOLDER
+    direction: 1
+
+  # ---- waist ---------------------------------------------------------------
+  - name: waist_yaw
+    id: 7
+    min_deg: -45.0          # PLACEHOLDER
+    max_deg: 45.0           # PLACEHOLDER
+    direction: 1
+
+  # ---- right leg (top-down) ------------------------------------------------
+  - name: right_hip_pitch
+    id: 8
+    min_deg: -90.0          # PLACEHOLDER
+    max_deg: 60.0           # PLACEHOLDER
+    direction: 1
+
+  - name: right_hip_roll
+    id: 9
+    min_deg: -30.0          # PLACEHOLDER
+    max_deg: 30.0           # PLACEHOLDER
+    direction: 1
+
+  - name: right_hip_yaw
+    id: 10
+    min_deg: -45.0          # PLACEHOLDER
+    max_deg: 45.0           # PLACEHOLDER
+    direction: 1
+
+  - name: right_knee_pitch
+    id: 11
+    min_deg: 0.0            # PLACEHOLDER
+    max_deg: 120.0          # PLACEHOLDER
+    direction: 1
+
+  - name: right_ankle_roll
+    id: 12
+    min_deg: -25.0          # PLACEHOLDER
+    max_deg: 25.0           # PLACEHOLDER
+    direction: 1
+
+  - name: right_ankle_pitch
+    id: 13
+    min_deg: -40.0          # PLACEHOLDER
+    max_deg: 25.0           # PLACEHOLDER
+    direction: 1

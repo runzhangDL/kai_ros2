@@ -1,0 +1,37 @@
+# ---- colcon / ament build output ----------------------------------------
+build/
+install/
+log/
+.colcon_install_layout
+COLCON_IGNORE
+
+# ---- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# ---- robot runtime state -------------------------------------------------
+# The motor calibration belongs to ONE physical robot and must never be shared
+# between machines via git -- pulling someone else's zeros onto this robot would
+# be actively dangerous. It normally lives in ~/.config/humanoid_robot/, well
+# outside the repo; these patterns are a backstop in case anyone points
+# `calibrate --store` at the working tree.
+calibration.yaml
+*.calib.yaml
+
+# ---- editors / OS --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ---- local tool config ---------------------------------------------------
+.claude/settings.local.json
