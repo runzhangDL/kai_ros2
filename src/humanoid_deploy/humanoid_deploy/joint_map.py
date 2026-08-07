@@ -41,12 +41,19 @@ class SeamViolation:
     lo_counts: float
     hi_counts: float
     counts_per_rev: int
+    scope: str = "command"      # "command" or "travel"
 
     def describe(self) -> str:
+        what = ("command window" if self.scope == "command"
+                else "full travel range")
+        certainty = ("the policy will drive it across the wrap"
+                     if self.scope == "command"
+                     else "the ramp crosses the wrap if the robot is armed "
+                          "from that part of its travel")
         return (
-            f"{self.name}: zero at count {self.zero_raw}, command window spans "
+            f"{self.name}: zero at count {self.zero_raw}, {what} spans "
             f"[{self.lo_counts:.0f}, {self.hi_counts:.0f}] which crosses the "
-            f"0/{self.counts_per_rev - 1} wrap"
+            f"0/{self.counts_per_rev - 1} wrap -- {certainty}"
         )
 
 
@@ -286,25 +293,43 @@ class JointMap:
         return lo, hi
 
     def seam_violations(self, margin_counts: float = 16.0) -> list[SeamViolation]:
-        """Joints whose reachable command window crosses the 0/cpr wrap."""
-        lo_rad, hi_rad = self.command_window()
-        lo_counts = self.rad_to_counts_unwrapped(lo_rad)
-        hi_counts = self.rad_to_counts_unwrapped(hi_rad)
-        low = np.minimum(lo_counts, hi_counts) - margin_counts
-        high = np.maximum(lo_counts, hi_counts) + margin_counts
+        """Joints that would have to be driven across the 0/cpr wrap.
 
+        Two scopes, both fatal:
+
+        ``command`` -- the window the policy can reach, ``+/-action_scale``
+        intersected with the safe envelope. A crossing here is certain to
+        happen the moment the policy runs.
+
+        ``travel`` -- the joint's whole safe range. Arming does not start from
+        the standing pose, it starts from wherever the robot physically is, and
+        the ramp then walks from there to the policy's target. So a joint whose
+        *travel* crosses the wrap is unsafe even when its command window does
+        not: it just needs to be armed from the far side.
+        """
         violations = []
-        for index in range(self.size):
-            if low[index] < 0.0 or high[index] > self.counts_per_rev[index] - 1.0:
-                violations.append(
-                    SeamViolation(
-                        name=self.names[index],
-                        zero_raw=int(self.zero_raw[index]),
-                        lo_counts=float(low[index]),
-                        hi_counts=float(high[index]),
-                        counts_per_rev=int(self.counts_per_rev[index]),
+        for scope, (lo_rad, hi_rad) in (
+            ("command", self.command_window()),
+            ("travel", (self.safe_lower, self.safe_upper)),
+        ):
+            lo_counts = self.rad_to_counts_unwrapped(lo_rad)
+            hi_counts = self.rad_to_counts_unwrapped(hi_rad)
+            low = np.minimum(lo_counts, hi_counts) - margin_counts
+            high = np.maximum(lo_counts, hi_counts) + margin_counts
+            for index in range(self.size):
+                if low[index] < 0.0 or high[index] > self.counts_per_rev[index] - 1.0:
+                    if any(v.name == self.names[index] for v in violations):
+                        continue        # already reported at the tighter scope
+                    violations.append(
+                        SeamViolation(
+                            name=self.names[index],
+                            zero_raw=int(self.zero_raw[index]),
+                            lo_counts=float(low[index]),
+                            hi_counts=float(high[index]),
+                            counts_per_rev=int(self.counts_per_rev[index]),
+                            scope=scope,
+                        )
                     )
-                )
         return violations
 
     def describe(self) -> str:

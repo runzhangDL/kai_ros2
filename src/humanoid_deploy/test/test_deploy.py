@@ -753,3 +753,29 @@ def test_swish_matches_the_definition():
     x = np.array([-2.0, 0.0, 1.5])
     assert np.allclose(swish(x), x / (1 + np.exp(-x)))
     assert swish(np.zeros(1))[0] == 0.0
+
+
+def test_seam_check_covers_the_whole_travel_not_just_the_command_window():
+    """Arming starts from wherever the robot is, so the ramp can cross a seam
+    the policy's own command window never touches."""
+    # zero at 875, +/-78 deg of travel = +/-887 counts -> dips below 0,
+    # but +/-0.4 rad of command (+/-261 counts) stays inside.
+    jm = make_map(names=("a",), zeros=(875,), directions=(1,),
+                  lo=(-78.0,), hi=(78.0,), action_scale=0.4)
+    violations = jm.seam_violations()
+    assert [v.scope for v in violations] == ["travel"]
+    assert "ramp crosses the wrap" in violations[0].describe()
+
+
+def test_a_command_window_crossing_is_reported_once_at_the_tighter_scope():
+    jm = make_map(names=("a",), zeros=(10,), directions=(1,),
+                  lo=(-78.0,), hi=(78.0,), action_scale=0.4)
+    violations = jm.seam_violations()
+    assert [v.scope for v in violations] == ["command"]
+
+
+def test_a_centred_zero_has_no_seam_violation_at_either_scope():
+    """After re-centring on 2048 the same joint is clean."""
+    jm = make_map(names=("a",), zeros=(2048,), directions=(1,),
+                  lo=(-88.0,), hi=(88.0,), action_scale=0.4)
+    assert jm.seam_violations() == []
