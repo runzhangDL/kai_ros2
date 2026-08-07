@@ -28,6 +28,7 @@ setup(
     entry_points={
         "console_scripts": [
             "calibrate = humanoid_calibration.calibrate_cli:main",
+            "verify_calibration = humanoid_calibration.verify_cli:main",
             "check_calibration = humanoid_calibration.guard:main",
             "calibration_status = humanoid_calibration.calibration_status_node:main",
         ],

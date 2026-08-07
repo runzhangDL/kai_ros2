@@ -115,6 +115,49 @@ against the joint's positive direction. Set `direction: -1` for that joint in
 ros2 run humanoid_calibration calibrate --only left_hip_roll
 ```
 
+## Verifying a finished calibration
+
+`calibrate --status` answers *"was this joint recorded, and is it stale?"* —
+presence, not correctness. A joint calibrated by mashing ENTER three times
+without moving anything shows up as a healthy `ok`.
+
+```bash
+ros2 run humanoid_calibration verify_calibration
+```
+
+checks the numbers against the geometry they claim to describe: the zero maps
+back to exactly 0°, each recorded limit run back through the same conversion a
+motion node will use lands where the config asked, a non-zero limit cannot
+share its encoder count with the zero, total travel in counts agrees with
+travel in degrees, and every raw value sits inside one encoder turn.
+
+```
+  joint                 zero   min   max   recovered range       verdict
+  left_ankle_pitch      2048  1568  2348    -42.19 ..  +26.37    ok
+  left_ankle_roll       2048  2048  2048     +0.00 ..   +0.00    FAIL
+  left_hip_roll         2048  1400  2408    -56.95 ..  +31.64    warn
+
+  FAIL  left_ankle_roll: min_raw equals zero_raw -- the joint was never moved
+  warn  left_hip_roll: min overshot by 27.0 deg (-56.95 vs -30.00)
+
+  FAIL -- re-run the affected joints:
+      ros2 run humanoid_calibration calibrate --only left_ankle_roll
+```
+
+Undershoot is a failure (the limit was never reached); overshoot is only a
+warning, since it just means you swung further than asked. Exit code is 0/1, so
+`-q` works in scripts.
+
+**The end-to-end check.** Stand the robot in the pose you calibrated against
+and add `--live`: it reads the bus and prints what each joint is at *right now*.
+Every joint should read close to 0°. That is the real proof the zeros mean what
+you think they mean — nothing else catches a joint that was zeroed while
+visibly off-vertical.
+
+```bash
+ros2 run humanoid_calibration verify_calibration --live
+```
+
 ## Where the calibration lives
 
 ```
@@ -211,9 +254,17 @@ ros2 run humanoid_calibration calibrate --status              # per-joint status
 ros2 run humanoid_calibration calibrate --port /dev/ttyTHS1   # override the bus
 ros2 run humanoid_calibration calibrate --mock                # no hardware
 
+ros2 run humanoid_calibration verify_calibration              # are the numbers self-consistent?
+ros2 run humanoid_calibration verify_calibration --live       # + what each joint reads right now
+ros2 run humanoid_calibration verify_calibration -q           # silent, for scripts
+
 ros2 run humanoid_calibration check_calibration               # exit 0 = ready, 1 = blocked
 ros2 run humanoid_calibration check_calibration -q            # silent, for scripts
 ```
+
+`check_calibration` is the gate (present and not stale). `verify_calibration`
+is the audit (the numbers are sane). Run the second after calibrating, the
+first from scripts and systemd units.
 
 `check_calibration` is a plain exit code, so it drops into systemd units,
 `ExecStartPre=`, or shell scripts.
@@ -244,10 +295,10 @@ colcon test --packages-select humanoid_calibration
 colcon test-result --verbose
 ```
 
-47 unit tests cover config validation, the store round-trip and its atomicity,
-staleness detection, angle conversion across the encoder seam, the pre-flight
-reliability gate, and the Feetech wire protocol — packet layout, checksums,
-resynchronisation, and this bus's echo behaviour including a partial echo left
+59 unit tests cover config validation, the store round-trip and its atomicity,
+staleness detection, angle conversion across the encoder seam, the
+post-calibration verifier, the pre-flight reliability gate, and the Feetech
+wire protocol — packet layout, checksums, resynchronisation, and this bus's echo behaviour including a partial echo left
 by a dropped turnaround byte.
 
 ## Layout
@@ -256,6 +307,7 @@ by a dropped turnaround byte.
 config/joint_limits.yaml       limits, servo ids, bus settings   <- FILL THIS IN
 humanoid_calibration/
   calibrate_cli.py             the interactive tool
+  verify_cli.py                verify_calibration -- the post-calibration audit
   guard.py                     require_calibration(), check_calibration CLI
   launch_guard.py              calibration_gate() for launch files
   calibration_status_node.py   latched status topic + service

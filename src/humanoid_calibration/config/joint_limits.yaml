@@ -71,80 +71,80 @@ joints:
   # ---- left leg (bottom-up) ------------------------------------------------
   - name: left_ankle_pitch
     id: 1
-    min_deg: -40.0          # PLACEHOLDER
-    max_deg: 25.0           # PLACEHOLDER
+    min_deg: -70.0          # PLACEHOLDER
+    max_deg: 20.0           # PLACEHOLDER
     direction: 1
 
   - name: left_ankle_roll
     id: 2
-    min_deg: -25.0          # PLACEHOLDER
-    max_deg: 25.0           # PLACEHOLDER
+    min_deg: -20.0          # PLACEHOLDER
+    max_deg: 20.0           # PLACEHOLDER
     direction: 1
 
   - name: left_knee_pitch
     id: 3
-    min_deg: 0.0            # PLACEHOLDER
-    max_deg: 120.0          # PLACEHOLDER
+    min_deg: -90.0            # PLACEHOLDER
+    max_deg: 0.0          # PLACEHOLDER
     direction: 1
 
   - name: left_hip_yaw
     id: 4
-    min_deg: -45.0          # PLACEHOLDER
-    max_deg: 45.0           # PLACEHOLDER
+    min_deg: -70.0          # PLACEHOLDER
+    max_deg: 70.0           # PLACEHOLDER
     direction: 1
 
   - name: left_hip_roll
     id: 5
-    min_deg: -30.0          # PLACEHOLDER
-    max_deg: 30.0           # PLACEHOLDER
+    min_deg: -90.0          # PLACEHOLDER
+    max_deg: 0.0           # PLACEHOLDER
     direction: 1
 
   - name: left_hip_pitch
     id: 6
-    min_deg: -90.0          # PLACEHOLDER
-    max_deg: 60.0           # PLACEHOLDER
+    min_deg: -80.0          # PLACEHOLDER
+    max_deg: 80.0           # PLACEHOLDER
     direction: 1
 
   # ---- waist ---------------------------------------------------------------
   - name: waist_yaw
     id: 7
-    min_deg: -45.0          # PLACEHOLDER
-    max_deg: 45.0           # PLACEHOLDER
+    min_deg: -90.0          # PLACEHOLDER
+    max_deg: 90.0           # PLACEHOLDER
     direction: 1
 
   # ---- right leg (top-down) ------------------------------------------------
   - name: right_hip_pitch
     id: 8
-    min_deg: -90.0          # PLACEHOLDER
-    max_deg: 60.0           # PLACEHOLDER
+    min_deg: -80.0          # PLACEHOLDER
+    max_deg: 80.0           # PLACEHOLDER
     direction: 1
 
   - name: right_hip_roll
     id: 9
-    min_deg: -30.0          # PLACEHOLDER
-    max_deg: 30.0           # PLACEHOLDER
+    min_deg: 0.0         # PLACEHOLDER
+    max_deg: 90.0           # PLACEHOLDER
     direction: 1
 
   - name: right_hip_yaw
     id: 10
-    min_deg: -45.0          # PLACEHOLDER
-    max_deg: 45.0           # PLACEHOLDER
+    min_deg: -70.0          # PLACEHOLDER
+    max_deg: 70.0           # PLACEHOLDER
     direction: 1
 
   - name: right_knee_pitch
     id: 11
     min_deg: 0.0            # PLACEHOLDER
-    max_deg: 120.0          # PLACEHOLDER
+    max_deg: 90.0          # PLACEHOLDER
     direction: 1
 
   - name: right_ankle_roll
     id: 12
-    min_deg: -25.0          # PLACEHOLDER
-    max_deg: 25.0           # PLACEHOLDER
+    min_deg: -20.0          # PLACEHOLDER
+    max_deg: 20.0           # PLACEHOLDER
     direction: 1
 
   - name: right_ankle_pitch
     id: 13
-    min_deg: -40.0          # PLACEHOLDER
-    max_deg: 25.0           # PLACEHOLDER
+    min_deg: -20.0          # PLACEHOLDER
+    max_deg: 70.0           # PLACEHOLDER
     direction: 1

@@ -467,6 +467,187 @@ def test_read_raw_honours_multi_turn_sign_bit():
     assert reader.read_raw(1) == -100
 
 
+# -- post-calibration verification ----------------------------------------
+
+
+def verified(cfg, **cal_kwargs):
+    """Run verify_joint for one joint config with overridable recorded values."""
+    from humanoid_calibration.verify_cli import verify_joint
+
+    cpr = 4096
+    per_deg = cpr / 360.0
+    defaults = dict(
+        name=cfg.name,
+        servo_id=cfg.id,
+        zero_raw=2048,
+        min_raw=int(round(2048 + cfg.direction * cfg.min_deg * per_deg)),
+        max_raw=int(round(2048 + cfg.direction * cfg.max_deg * per_deg)),
+        min_deg=cfg.min_deg,
+        max_deg=cfg.max_deg,
+        direction=cfg.direction,
+        counts_per_rev=cpr,
+        calibrated_at=utc_now(),
+    )
+    defaults.update(cal_kwargs)
+    return verify_joint(cfg, JointCalibration(**defaults), cpr, 1.0, 5.0)
+
+
+def ankle(tmp_path):
+    return load_config(write_config(tmp_path)).joint("left_ankle_pitch")
+
+
+def consistent_store(tmp_path, config):
+    """A store whose raw counts really do match each joint's configured limits.
+
+    Distinct from `calibrated_store`, which fills every joint with the same
+    placeholder counts -- fine for staleness tests, but the verifier would
+    (correctly) reject it.
+    """
+    per_deg = 4096 / 360.0
+    store = CalibrationStore(str(tmp_path / "consistent.yaml"))
+    for joint in config.joints:
+        store.record(
+            JointCalibration(
+                name=joint.name,
+                servo_id=joint.id,
+                zero_raw=2048,
+                min_raw=int(round(2048 + joint.direction * joint.min_deg * per_deg)),
+                max_raw=int(round(2048 + joint.direction * joint.max_deg * per_deg)),
+                min_deg=joint.min_deg,
+                max_deg=joint.max_deg,
+                direction=joint.direction,
+                counts_per_rev=4096,
+                calibrated_at=utc_now(),
+            ),
+            config.fingerprint,
+            config.source_path,
+        )
+    store.save()
+    return store
+
+
+def test_verify_accepts_a_good_calibration(tmp_path):
+    report = verified(ankle(tmp_path))
+    assert report.ok and not report.warnings
+    assert report.rec_min == pytest.approx(-40.0, abs=0.1)
+    assert report.rec_max == pytest.approx(25.0, abs=0.1)
+
+
+def test_verify_catches_enter_mashed_without_moving(tmp_path):
+    """The failure --status cannot see: all three captured at the same spot."""
+    report = verified(ankle(tmp_path), min_raw=2048, max_raw=2048)
+    assert not report.ok
+    assert any("never moved" in e for e in report.errors)
+
+
+def test_verify_catches_a_limit_that_was_never_reached(tmp_path):
+    cfg = ankle(tmp_path)
+    short = int(round(2048 - 20.0 * 4096 / 360.0))  # stopped at -20, asked -40
+    report = verified(cfg, min_raw=short)
+    assert not report.ok
+    assert any("min never reached" in e for e in report.errors)
+
+
+def test_verify_warns_on_overshoot_but_still_passes(tmp_path):
+    cfg = ankle(tmp_path)
+    far = int(round(2048 - 55.0 * 4096 / 360.0))  # swung to -55, asked -40
+    report = verified(cfg, min_raw=far)
+    assert report.ok
+    assert any("overshot" in w for w in report.warnings)
+
+
+def test_verify_catches_an_inverted_direction(tmp_path):
+    """min and max recorded on the wrong sides of zero."""
+    cfg = ankle(tmp_path)
+    per_deg = 4096 / 360.0
+    report = verified(
+        cfg,
+        min_raw=int(round(2048 + 25.0 * per_deg)),
+        max_raw=int(round(2048 - 40.0 * per_deg)),
+    )
+    assert not report.ok
+
+
+def test_verify_catches_raw_outside_one_turn(tmp_path):
+    report = verified(ankle(tmp_path), zero_raw=5000)
+    assert not report.ok
+    assert any("outside 0..4095" in e for e in report.errors)
+
+
+def test_verify_catches_a_counts_per_rev_mismatch(tmp_path):
+    report = verified(ankle(tmp_path), counts_per_rev=1024)
+    assert not report.ok
+    assert any("counts_per_rev" in e for e in report.errors)
+
+
+def test_verify_allows_a_zero_limit_to_share_the_zero_count(tmp_path):
+    """A knee with min_deg 0 legitimately records min_raw == zero_raw."""
+    knee = load_config(write_config(tmp_path)).joint("left_knee_pitch")
+    report = verified(knee)
+    assert knee.min_deg == 0.0
+    assert report.ok, report.errors
+
+
+def test_verify_handles_a_zero_near_the_encoder_seam(tmp_path):
+    """Zero at count 10: the limits wrap, and must still recover correctly."""
+    cfg = ankle(tmp_path)
+    per_deg = 4096 / 360.0
+    report = verified(
+        cfg,
+        zero_raw=10,
+        min_raw=int(round(10 - 40.0 * per_deg)) % 4096,
+        max_raw=int(round(10 + 25.0 * per_deg)) % 4096,
+    )
+    assert report.ok, report.errors
+    assert report.rec_min == pytest.approx(-40.0, abs=0.2)
+
+
+def test_verify_reports_missing_joints(tmp_path):
+    from humanoid_calibration.verify_cli import verify
+
+    config = load_config(write_config(tmp_path))
+    store = CalibrationStore(str(tmp_path / "c.yaml"))
+    reports = verify(config, store, overshoot_warn=5.0)
+    assert [r.name for r in reports] == config.joint_names
+    assert all("not calibrated" in r.errors for r in reports)
+
+
+def test_verify_live_flags_a_joint_away_from_zero(tmp_path):
+    from humanoid_calibration.verify_cli import verify
+
+    config = load_config(write_config(tmp_path))
+    store = consistent_store(tmp_path, config)
+
+    class AtZero:
+        def read_raw(self, servo_id):
+            return 2048
+
+    class WayOff:
+        def read_raw(self, servo_id):
+            return 2048 + int(30.0 * 4096 / 360.0)
+
+    clean = verify(config, store, 5.0, reader=AtZero(), live_tolerance=10.0)
+    assert all(not r.warnings for r in clean)
+    assert clean[0].live_deg == pytest.approx(0.0)
+
+    off = verify(config, store, 5.0, reader=WayOff(), live_tolerance=10.0)
+    assert all(any("expected near 0" in w for w in r.warnings) for r in off)
+
+
+def test_verify_live_flags_a_silent_servo(tmp_path):
+    from humanoid_calibration.verify_cli import verify
+
+    config = load_config(write_config(tmp_path))
+    store = consistent_store(tmp_path, config)
+
+    class Dead:
+        def read_raw(self, servo_id):
+            return None
+
+    reports = verify(config, store, 5.0, reader=Dead())
+    assert all(any("no reply" in e for e in r.errors) for r in reports)
+
+
 # -- pre-flight bus check -------------------------------------------------
 
 
