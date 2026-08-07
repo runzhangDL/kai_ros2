@@ -67,11 +67,39 @@ def extract(params):
     return mean, std, layers
 
 
-def model_metadata(xml_path, frame_skip, action_scale):
+def resolve_frame_skip(timestep, control_rate_hz, override=None):
+    """Reproduce ``MuJoCoBipedStandMJX``'s rate -> frame_skip conversion exactly.
+
+    The env takes a control *rate* and rounds it to a whole number of physics
+    steps; the achieved rate is then ``1/(frame_skip*timestep)``, which is not
+    always the number that was asked for. Deriving it the same way here is the
+    point: the bundle must record the rate the policy was actually trained at,
+    not the one on the command line.
+    """
+    if override is not None:
+        frame_skip = int(override)
+    else:
+        frame_skip = int(round(1.0 / (control_rate_hz * timestep)))
+    if frame_skip < 1:
+        raise SystemExit(
+            f"control_rate_hz={control_rate_hz} is faster than the physics "
+            f"timestep {timestep}s"
+        )
+    actual = 1.0 / (frame_skip * timestep)
+    if override is None and abs(actual - control_rate_hz) > 0.01:
+        print(f"note  : {control_rate_hz} Hz is not an integer multiple of the "
+              f"{timestep}s timestep; the env used {actual:.2f} Hz "
+              f"(frame_skip={frame_skip}) and so does this bundle")
+    return frame_skip, actual
+
+
+def model_metadata(xml_path, control_rate_hz, frame_skip_override, action_scale):
     """Pull joint order, limits and timing straight from the trained model."""
     import mujoco
 
     mj = mujoco.MjModel.from_xml_path(xml_path)
+    frame_skip, actual_hz = resolve_frame_skip(
+        mj.opt.timestep, control_rate_hz, frame_skip_override)
 
     # Actuator order IS the action order and (for this robot, one actuator per
     # hinge in declaration order) the observation's joint order. We verify that
@@ -109,6 +137,7 @@ def model_metadata(xml_path, frame_skip, action_scale):
         "frame_skip": int(frame_skip),
         "physics_timestep": float(mj.opt.timestep),
         "control_dt": float(mj.opt.timestep * frame_skip),
+        "control_rate_hz": float(actual_hz),
         "nq": int(mj.nq),
         "nv": int(mj.nv),
         "nu": int(mj.nu),
@@ -178,8 +207,14 @@ def main() -> int:
     parser.add_argument("--params", default="stand_params.pkl")
     parser.add_argument("--xml", default="robot/robot.xml")
     parser.add_argument("--out", default="policy_bundle.npz")
-    parser.add_argument("--action-scale", type=float, default=0.4)
-    parser.add_argument("--frame-skip", type=int, default=4)
+    parser.add_argument("--action-scale", type=float, default=0.4,
+                        help="must equal the env's action_scale (default 0.4)")
+    parser.add_argument("--control-rate-hz", type=float, default=25.0,
+                        help="must equal the env's control_rate_hz; 25 Hz is "
+                             "the rate the STS bus benchmark supports")
+    parser.add_argument("--frame-skip", type=int, default=None,
+                        help="explicit override, only if you passed frame_skip "
+                             "to the env directly instead of a rate")
     parser.add_argument("--tolerance", type=float, default=2e-5)
     parser.add_argument("--skip-verify", action="store_true")
     args = parser.parse_args()
@@ -197,7 +232,8 @@ def main() -> int:
     if np.any(std <= 0) or not np.all(np.isfinite(std)):
         raise SystemExit("normalizer std has non-positive or non-finite entries")
 
-    meta = model_metadata(args.xml, args.frame_skip, args.action_scale)
+    meta = model_metadata(args.xml, args.control_rate_hz, args.frame_skip,
+                          args.action_scale)
     if meta["nu"] != act_size:
         raise SystemExit(f"XML has {meta['nu']} actuators but policy emits {act_size}")
     expected_obs = 9 + (meta["nq"] - 7) + (meta["nv"] - 6) + meta["nu"]
@@ -206,7 +242,8 @@ def main() -> int:
             f"XML implies obs size {expected_obs} but the policy takes {obs_size}"
         )
     print(f"model : {meta['nu']} joints, control dt={meta['control_dt']:.4f}s "
-          f"({1 / meta['control_dt']:.1f} Hz)")
+          f"({meta['control_rate_hz']:.1f} Hz, frame_skip={meta['frame_skip']}, "
+          f"physics {meta['physics_timestep']}s), action_scale={meta['action_scale']}")
     for name, lo, hi in zip(meta["joint_names"], meta["xml_lower_rad"], meta["xml_upper_rad"]):
         print(f"        {name:<20} [{np.degrees(lo):+7.1f}, {np.degrees(hi):+7.1f}] deg")
 

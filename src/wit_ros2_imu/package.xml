@@ -8,6 +8,14 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
+  <!-- Declared to match what the driver actually imports. The manufacturer's
+       package.xml listed only rclpy, so colcon did not know imu_msg has to be
+       built first, and rosdep could not install the serial/numpy deps. The
+       Python sources are unchanged. -->
+  <depend>sensor_msgs</depend>
+  <depend>imu_msg</depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

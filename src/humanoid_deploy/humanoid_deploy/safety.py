@@ -26,7 +26,8 @@ the others:
 4. **Rate limit.** Caps per-step change, so a bad action becomes a slow move
    rather than a hammer blow.
 5. **Fall / fault detection.** Sustained tilt, free-fall, stale commands, lost
-   servos, overtemperature. Any of these latches FAULT.
+   servos, overtemperature, undervoltage, and a joint that never reaches what
+   it was told (a stall). Any of these latches FAULT.
 
 FAULT is terminal on purpose. An automatic retry after a fall is how a robot
 gets destroyed by a loop of standing up and falling over; recovery requires a
@@ -72,6 +73,9 @@ class SafetyConfig:
     # liveness
     command_timeout_s: float = 0.20
     max_consecutive_read_failures: int = 5
+    # stall / tracking
+    stall_error_rad: float = 0.2618      # 15 deg
+    stall_persist_s: float = 2.0
     # servo health
     max_temperature_c: int = 65
     min_voltage_v: float = 9.5
@@ -106,6 +110,7 @@ class SafetySupervisor:
         self._tilt_strikes = 0
         self._freefall_strikes = 0
         self._read_failures = 0
+        self._stall_seconds = np.zeros(len(joint_map.names))
 
     # -- faults ------------------------------------------------------------
 
@@ -183,6 +188,7 @@ class SafetySupervisor:
         self._tilt_strikes = 0
         self._freefall_strikes = 0
         self._read_failures = 0
+        self._stall_seconds[:] = 0.0
         self.state = SafetyState.RAMPING
         return []
 
@@ -254,6 +260,51 @@ class SafetySupervisor:
                     return self.trip(
                         "UNDERVOLT", f"{name} at {volts:.1f} V (limit "
                                      f"{self.cfg.min_voltage_v:.1f} V)")
+        return None
+
+    def check_tracking(self, measured_rad, dt: float) -> Fault | None:
+        """Fault a joint that is commanded somewhere it never arrives.
+
+        This policy leans on the model's joint limits: measured in MuJoCo, it
+        commands the knees and the right hip roll to their endpoint on 74-97%
+        of cycles. In simulation that costs nothing -- the limit constraint
+        supplies the holding force. On hardware it costs nothing only if a
+        mechanical stop really sits at the calibrated endpoint. If it does not,
+        the servo supplies that force itself, indefinitely, and the only
+        outward sign is heat.
+
+        A persistent gap between the commanded and the measured angle is the
+        signature of that, and of every other way a joint gets stuck: a jammed
+        linkage, a stripped horn, a servo that quietly browned out. In the same
+        MuJoCo rollout the steady-state tracking error stays under 0.4 deg and
+        peaks at 2.5 deg, so the 15 deg default has a wide margin over anything
+        normal operation produces.
+
+        Only armed once RUNNING: during RAMPING the command is deliberately
+        being dragged away from where the robot is.
+        """
+        if self.faulted or self.state is not SafetyState.RUNNING:
+            self._stall_seconds[:] = 0.0
+            return None
+        if self._last_target is None:
+            return None
+
+        error = np.abs(np.asarray(measured_rad, dtype=np.float64) - self._last_target)
+        stuck = error > self.cfg.stall_error_rad
+        self._stall_seconds = np.where(stuck, self._stall_seconds + max(dt, 0.0), 0.0)
+
+        over = np.nonzero(self._stall_seconds >= self.cfg.stall_persist_s)[0]
+        if over.size:
+            worst = int(over[np.argmax(error[over])])
+            return self.trip(
+                "STALL",
+                f"{self.map.names[worst]} has sat "
+                f"{np.degrees(error[worst]):.1f} deg away from its commanded "
+                f"angle for {self._stall_seconds[worst]:.1f} s "
+                f"(limit {np.degrees(self.cfg.stall_error_rad):.0f} deg for "
+                f"{self.cfg.stall_persist_s:.1f} s). The joint is jammed, "
+                "mis-calibrated, or the servo has lost power.",
+            )
         return None
 
     # -- command shaping ---------------------------------------------------

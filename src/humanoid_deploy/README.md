@@ -53,28 +53,76 @@ write if the numpy forward pass disagrees with brax.
 | 3 | Joint units | Counts → radians via calibration, shortest-way-round so a zero near the seam still reads continuously. |
 | 4 | Normalization | `mean`/`std` come straight out of the checkpoint (EMA mode) into the bundle. |
 | 5 | Action | Raw output is 26 numbers = `(loc, scale)`. Deterministic action is `tanh(loc[:13])`, then `clip(0 + a*0.4, limits)`. Using the raw output directly would be wrong. |
-| 6 | Control rate | See below. |
+| 6 | Control rate | See below. Trained at 25 Hz with `--domain-rand` and `--action-delay-steps 1`; deployment inherits the rate from the bundle and reproduces the one-cycle delay structurally. |
 
-## Control rate: 125 Hz is not reachable at 250000 baud
+## Control rate: 25 Hz, measured then trained
 
-A cycle costs one sync read of 13 positions (~6–8 ms of airtime) plus one sync
-write (~2 ms). 125 Hz needs the whole cycle in 8 ms. Measure yours:
+`bus_benchmark` on the real robot measured a **24 ms** read+write cycle, p99
+28 ms — a 35.7 Hz ceiling. The policy was then **retrained at 25 Hz**
+(`frame_skip=20` over the 2 ms physics step), so training and deployment agree
+and there is 12 ms of headroom per cycle for retries and jitter.
+
+Nothing restates that number. `control_rate_hz: 0.0` means *take the rate from
+the bundle*, and the bundle takes it from the same `control_rate_hz` the env
+was constructed with, converted through MuJoCo's timestep exactly the way
+`MuJoCoBipedStandMJX.__init__` does it. Setting the parameter by hand is the
+one way to desync them, so `servo_node` warns loudly if you do.
+
+Re-measure whenever the bus changes:
 
 ```bash
 ros2 run humanoid_deploy bus_benchmark
 ```
 
-It reports p50/p99 cycle time and a recommended rate (~70% of the ceiling). The
-default is **50 Hz**. Running slower than training degrades push recovery — the
-policy's notion of a timestep no longer matches reality, and `servo_node` warns
-about it at startup. Your options, best first:
+### What the policy actually asks for at 25 Hz
 
-1. **Retrain** with `frame_skip` set so the simulated rate matches what the bus
-   achieves (`frame_skip=10` → 50 Hz).
-2. Raise the baud rate and re-qualify with `sts_tool.py bustest` — but you
-   chose 250000 for reliability, and a dropped read is worse than a slow loop.
-3. Accept 50 Hz. Likely fine for standing (the servo's own loop is much faster
-   and the policy commands positions, not torques); worse under shove.
+Rolled out in MuJoCo against the exported bundle (`tools/` is not shipped to
+the robot, but the numbers are worth knowing):
+
+| | commanded joint rate |
+|---|---|
+| standing quietly | p99 **0.6 rad/s**, and it holds height 0.520 m at ≤3.8° tilt |
+| recovering from a shove | p99 **9.4 rad/s**, peak 18.6 rad/s |
+
+An STS3215 tops out near 4.7 rad/s unloaded, so **the servo, not the software,
+is the limit during a recovery**. `servo_goal_speed: 2000` (3.07 rad/s) is set
+for bring-up and is ample for standing; raise it toward 3000 once the robot has
+stood quietly, or push recovery will be sluggish.
+
+Push recovery envelope, same rollout (8 directions each):
+
+| shove | survives |
+|---|---|
+| 6 N × 200 ms | 8/8 |
+| 8 N × 200 ms | 6/8 |
+| 12 N × 200 ms | 1/8 |
+| 12 N × 80 ms | 8/8 |
+| initial torso tilt up to 10.3° | 8/8 |
+
+So it is reliable inside most of the trained push distribution and gives up at
+the extreme corner (max force *and* max duration together).
+
+### The policy leans on the joint limits
+
+Measured over the same rollout, the raw network output is clipped by the
+model's joint range on **74% (left knee), 94% (right hip roll) and 97% (right
+knee)** of cycles — it commands those joints to their endpoint and holds them
+there. That is not a bug and it is identical in training, which applies the
+same clip.
+
+It matters for two reasons:
+
+* Those four joints stand *on* a hard limit, so `limit_margin_deg` cannot give
+  them a cushion on that side. `JointMap` detects this and reports them in
+  `unmargined` rather than shrinking the envelope below the pose the robot has
+  to be in — otherwise the robot could never arm.
+* On hardware the endpoint is only free if a mechanical stop really sits there.
+  Checked in MuJoCo, steady-state tracking error stays under **0.4°** and peak
+  torque is **19% of the 2.354 Nm limit**, with no joint saturating — so this
+  is cheap, not a stall. The **stall guard** (`stall_error_deg: 15.0`,
+  `stall_persist_s: 2.0`) exists to catch the case where it *isn't*: a joint
+  sitting 15° off its command for 2 s is jammed, mis-calibrated or unpowered,
+  and that latches FAULT.
 
 ## Safety
 
@@ -89,9 +137,9 @@ Layered, each independent. In order of how early they catch a mistake:
 3. **Arm preflight** — must be held upright, all servos reading, every joint
    inside its envelope, and *the observation must look statistically like
    training data*. That last one is the cheap detector for a swapped axis, an
-   accelerometer in g, or a gyro in deg/s: `grav_z` has a training σ of 0.02,
-   so pointing it wrong lands ~50σ out. Verified — omitting the rotation is
-   caught at 49σ.
+   accelerometer in g, or a gyro in deg/s: `grav_z` has a training σ of 0.036,
+   so pointing it wrong lands far outside. Verified against this bundle —
+   omitting the rotation is caught at **28σ**, against a 6σ gate.
 4. **Ramp** — blends from the pose the robot is *actually* in toward the policy
    target over 3 s, so arming never snaps a joint.
 5. **Envelope clamp** — intersection of calibrated travel and XML limits, minus
@@ -101,11 +149,14 @@ Layered, each independent. In order of how early they catch a mistake:
    latched**. Terminal by design; automatic recovery is how a robot destroys
    itself in a stand-up/fall-over loop. `servo_node` watches the IMU itself, so
    a hung policy node cannot suppress it.
-8. **Watchdog / bus / thermal** — stale command, lost servos, over-temperature
+8. **Stall guard** — a joint more than 15° from its command for 2 s latches
+   FAULT. Active only once RUNNING; during the ramp the command is deliberately
+   away from where the robot is.
+9. **Watchdog / bus / thermal** — stale command, lost servos, over-temperature
    or under-voltage all latch FAULT.
-9. **EEPROM lock** — every write is checked against the RAM block (40..54). The
-   deployment path physically cannot re-id a servo, change its baud, or touch
-   its angle limits.
+10. **EEPROM lock** — every write is checked against the RAM block (40..54).
+    The deployment path physically cannot re-id a servo, change its baud, or
+    touch its angle limits.
 
 `humanoid_calibration.feetech_bus` stays read-only; this package imports only
 its pure packet helpers, so that audit property is preserved.
@@ -153,11 +204,22 @@ Release torque before handling the robot:
 
 ## Things to know
 
-**Two nodes cost one control period of latency** (sensor → policy → executor).
-`policy_node` is driven by `/humanoid/joint_states` rather than its own timer to
-keep it to one rather than two. At 50 Hz that is 20 ms. If that proves too slow,
-the two can be merged into one process — the logic is already separated into
-plain classes with no ROS in them.
+**The two-node latency is exactly what was trained.** The split costs one
+control period (sensor → policy → executor); `policy_node` is driven by
+`/humanoid/joint_states` rather than its own timer to keep it to one rather than
+two. This policy was trained with `--action-delay-steps 1`, so that period is
+modelled rather than merely tolerated. Tracing the indices:
+
+| | training (`action_delay_steps=1`) | deployment |
+|---|---|---|
+| observation at step *k* carries | `a[k-1]` | `a[k-1]` — `_last_action` |
+| actuators during *k*→*k+1* hold | `a[k-1]` (from the queue) | `a[k-1]` — cycle *k* writes the command that arrived before it |
+
+They line up. `servo_node` reads, publishes, and writes inside one timer
+callback, and rclpy's single-threaded executor cannot interleave `_on_command`
+into that, so the write always uses the *previous* cycle's action. Do not
+"optimise" this by writing later in the cycle: that would remove a delay the
+policy was trained to expect.
 
 **Four of your joints stand on a hard limit.** `left_knee_pitch [-90, 0]`,
 `left_hip_roll [-90, 0]`, `right_hip_roll [0, 90]`, `right_knee_pitch [0, 90]`

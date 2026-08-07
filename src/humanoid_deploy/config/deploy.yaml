@@ -20,14 +20,16 @@
     timeout_ms: 30
 
     # ---- control rate ------------------------------------------------------
-    # The policy was TRAINED AT 125 Hz. At 250000 baud a cycle costs roughly
-    # 6-8 ms of sync read plus ~2 ms of sync write, so 125 Hz (8 ms) is not
-    # reachable -- measure yours with:
-    #     ros2 run humanoid_deploy bus_benchmark
-    # 50 Hz leaves generous headroom for retries and jitter. Running slower
-    # than training degrades push recovery; if you want the trained behaviour,
-    # retrain with frame_skip matched to the rate you actually achieve.
-    control_rate_hz: 50.0
+    # 0.0 = run at the rate recorded in the bundle, which is the rate the
+    # policy was trained at. This policy was retrained at 25 Hz to match the
+    # measured bus: bus_benchmark reported a 24 ms read+write cycle with a p99
+    # of 28 ms (a 35.7 Hz ceiling), so 25 Hz (40 ms) leaves 12 ms of headroom
+    # for retries and jitter.
+    #
+    # Leave this at 0.0. Setting it by hand is how training and deployment
+    # drift apart: one policy step would stop meaning one physical timestep,
+    # and every joint velocity in the observation would be scaled wrong.
+    control_rate_hz: 0.0
 
     # ---- START HERE --------------------------------------------------------
     # true: the entire loop runs, everything is published and logged, and not
@@ -51,23 +53,42 @@
     limit_margin_deg: 2.0        # shrink the calibrated envelope by this much
     ramp_s: 3.0                  # blend from the current pose into the policy
     ramp_joint_rate: 1.0         # rad/s while ramping
-    max_joint_rate: 4.0          # rad/s once running
+    # rad/s once running. Rolled out in MuJoCo, this policy asks for under
+    # 0.6 rad/s while standing quietly and up to 18 rad/s for a few cycles
+    # while recovering from a shove -- far more than an STS3215 can deliver
+    # (~4.7 rad/s unloaded), so the hardware is the real limit and this is a
+    # backstop that only bites during a recovery.
+    max_joint_rate: 4.0
     arm_tilt_deg: 12.0           # must be this upright to arm
     fall_tilt_deg: 40.0          # sustained tilt beyond this = FALL
-    command_timeout_s: 0.20      # stale policy command = fault
+    command_timeout_s: 0.20      # stale policy command = fault (5 cycles)
     ood_sigma: 6.0               # per-element z-score bound at arm time
     max_temperature_c: 65
     min_voltage_v: 9.5
+    # Stall guard. The policy commands the knees and the right hip roll to
+    # their calibrated endpoint on most cycles -- in MuJoCo it then tracks to
+    # within 0.4 deg, so a joint sitting 15 deg off its command for 2 s is
+    # jammed, mis-calibrated or unpowered, not busy.
+    stall_error_deg: 15.0
+    stall_persist_s: 2.0
     shutdown_on_fault: false     # false keeps the node alive to REPORT the
                                  # fault; torque is off and latched either way
 
     # ---- servo behaviour ---------------------------------------------------
     # Written once at arm time (RAM registers, they persist). Goal speed 0 would
     # mean "as fast as possible", which is not what you want on a leg.
+    #
+    # 2000 counts/s (3.07 rad/s) is deliberately conservative and is plenty for
+    # standing, which needs under 0.6 rad/s. It is NOT enough for push recovery
+    # -- the policy asks for ~9 rad/s there. Raise it toward 3000 only after
+    # the robot has stood quietly on a gantry, and expect it to move faster.
     servo_goal_speed: 2000       # counts/s (~176 deg/s)
     servo_acc: 30
-    velocity_filter_tau: 0.02    # s, low-pass on finite-differenced velocity
-    health_check_period_cycles: 10
+    # 0.0 = no extra filter. At 25 Hz one encoder count over one cycle is
+    # 0.038 rad/s, i.e. 1-5% of the training sigma on every qvel channel, so
+    # there is nothing worth filtering and a filter would only add lag.
+    velocity_filter_tau: 0.0
+    health_check_period_cycles: 10   # one servo's temp/voltage every 0.4 s
 
 /humanoid_policy:
   ros__parameters:

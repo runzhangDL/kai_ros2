@@ -577,6 +577,60 @@ def test_overtemperature_trips():
     assert fault.code == "OVERTEMP"
 
 
+def _run_to_running(sup, at=(0.0, 0.0)):
+    """Arm and finish the ramp, leaving the last target at ``at``."""
+    sup.arm(list(at), FakeImu(), np.zeros(48), FakePolicy())
+    for _ in range(10):
+        sup.shape(list(at), 0.04)
+    assert sup.state is SafetyState.RUNNING
+    return sup
+
+
+def test_a_joint_that_never_reaches_its_command_trips_stall():
+    sup, _ = make_supervisor(ramp_s=0.0, stall_error_rad=0.26, stall_persist_s=0.2)
+    _run_to_running(sup)
+    # commanded to 0, but the joint is stuck 30 deg away
+    stuck = [np.radians(30.0), 0.0]
+    assert sup.check_tracking(stuck, 0.04) is None      # 0.04 s of 0.2
+    assert sup.check_tracking(stuck, 0.04) is None
+    assert sup.check_tracking(stuck, 0.04) is None
+    assert sup.check_tracking(stuck, 0.04) is None
+    fault = sup.check_tracking(stuck, 0.04)
+    assert fault.code == "STALL"
+    assert "a" in fault.detail
+
+
+def test_stall_timer_resets_when_the_joint_catches_up():
+    """A slow joint is not a stalled one; only a sustained gap counts."""
+    sup, _ = make_supervisor(ramp_s=0.0, stall_error_rad=0.26, stall_persist_s=0.2)
+    _run_to_running(sup)
+    for _ in range(4):
+        assert sup.check_tracking([np.radians(30.0), 0.0], 0.04) is None
+    assert sup.check_tracking([0.0, 0.0], 0.04) is None          # caught up
+    for _ in range(4):
+        assert sup.check_tracking([np.radians(30.0), 0.0], 0.04) is None
+    assert not sup.faulted
+
+
+def test_normal_tracking_error_never_trips_stall():
+    """MuJoCo puts steady-state error under 0.4 deg and peaks at 2.5 deg."""
+    sup, _ = make_supervisor(ramp_s=0.0)
+    _run_to_running(sup)
+    for _ in range(500):                                  # 20 s at 25 Hz
+        assert sup.check_tracking([np.radians(2.5), np.radians(-2.5)], 0.04) is None
+    assert not sup.faulted
+
+
+def test_stall_is_not_checked_while_ramping():
+    """During the ramp the command is deliberately away from the robot."""
+    sup, _ = make_supervisor(ramp_s=10.0, stall_error_rad=0.26, stall_persist_s=0.2)
+    sup.arm([1.0, 1.0], FakeImu(), np.zeros(48), FakePolicy())
+    for _ in range(50):
+        sup.shape([0.0, 0.0], 0.04)
+        assert sup.check_tracking([1.0, 1.0], 0.04) is None
+    assert sup.state is SafetyState.RAMPING
+
+
 def test_fault_is_latched_and_stops_all_commands():
     sup, _ = make_supervisor(fall_persist_cycles=1)
     sup.arm([0.0, 0.0], FakeImu(), np.zeros(48), FakePolicy())

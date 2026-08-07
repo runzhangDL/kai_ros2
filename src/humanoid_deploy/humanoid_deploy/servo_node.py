@@ -67,10 +67,13 @@ class ServoNode(Node):
         p("port", "/dev/ttyTHS1")
         p("baudrate", 250000)
         p("timeout_ms", 30)
-        p("control_rate_hz", 50.0)
+        # 0.0 means "run at whatever rate the bundle was trained at", which is
+        # the only value that cannot drift away from training. Override only to
+        # deliberately run slower.
+        p("control_rate_hz", 0.0)
         p("dry_run", True)
         p("shutdown_on_fault", False)
-        p("velocity_filter_tau", 0.02)
+        p("velocity_filter_tau", 0.0)
         p("servo_goal_speed", 2000)
         p("servo_acc", 30)
         p("health_check_period_cycles", 10)
@@ -94,9 +97,11 @@ class ServoNode(Node):
         p("ood_sigma", 6.0)
         p("max_temperature_c", 65)
         p("min_voltage_v", 9.5)
+        p("stall_error_deg", 15.0)
+        p("stall_persist_s", 2.0)
 
         self.dry_run = bool(self.get_parameter("dry_run").value)
-        self.control_dt = 1.0 / float(self.get_parameter("control_rate_hz").value)
+        requested_hz = float(self.get_parameter("control_rate_hz").value)
 
         # --- 1. the robot must be calibrated -----------------------------
         try:
@@ -113,13 +118,21 @@ class ServoNode(Node):
         except PolicyError as exc:
             raise SystemExit(f"cannot load policy bundle: {exc}") from exc
 
-        if abs(self.control_dt - self.policy.control_dt) > 1e-9:
-            self.get_logger().warning(
-                f"running at {1 / self.control_dt:.1f} Hz but the policy was "
-                f"trained at {1 / self.policy.control_dt:.1f} Hz. The policy will "
-                "still run, but its notion of one timestep no longer matches "
-                "reality; expect degraded push recovery."
-            )
+        if requested_hz <= 0.0:
+            self.control_dt = self.policy.control_dt
+            self.get_logger().info(
+                f"control rate taken from the bundle: "
+                f"{1 / self.control_dt:.1f} Hz (as trained)")
+        else:
+            self.control_dt = 1.0 / requested_hz
+            if abs(self.control_dt - self.policy.control_dt) > 1e-4 * self.policy.control_dt:
+                self.get_logger().warning(
+                    f"running at {requested_hz:.1f} Hz but the policy was trained "
+                    f"at {1 / self.policy.control_dt:.1f} Hz. It will still run, but "
+                    "one policy step no longer means one physical timestep, and "
+                    "the joint velocities it sees are scaled wrong. Set "
+                    "control_rate_hz to 0.0 to follow the bundle."
+                )
 
         # --- 3. map policy joints onto calibrated servos -----------------
         margin = np.radians(float(self.get_parameter("limit_margin_deg").value))
@@ -173,6 +186,9 @@ class ServoNode(Node):
                 ood_sigma=float(self.get_parameter("ood_sigma").value),
                 max_temperature_c=int(self.get_parameter("max_temperature_c").value),
                 min_voltage_v=float(self.get_parameter("min_voltage_v").value),
+                stall_error_rad=np.radians(
+                    float(self.get_parameter("stall_error_deg").value)),
+                stall_persist_s=float(self.get_parameter("stall_persist_s").value),
             ),
         )
 
@@ -207,6 +223,7 @@ class ServoNode(Node):
         self._positions = np.zeros(self.map.size)
         self._velocities = np.zeros(self.map.size)
         self._have_positions = False
+        self._last_read_time: float | None = None
         self._command: np.ndarray | None = None
         self._command_time: float | None = None
         self._observation: np.ndarray | None = None
@@ -290,12 +307,30 @@ class ServoNode(Node):
         if read_ok:
             counts = np.array([raw[i] for i in self.servo_ids], dtype=np.float64)
             positions = self.map.counts_to_rad(counts)
+            now = self.get_clock().now().nanoseconds * 1e-9
+            # Divide by the interval that actually elapsed, not the nominal
+            # period. The bus takes ~24 ms with a long tail, so timer callbacks
+            # jitter; using the nominal dt would scale every velocity by the
+            # jitter ratio, and qvel is a third of the observation.
+            elapsed = self.control_dt
+            if self._last_read_time is not None:
+                measured = now - self._last_read_time
+                if 0.2 * self.control_dt < measured < 5.0 * self.control_dt:
+                    elapsed = measured
             if self._have_positions:
                 tau = float(self.get_parameter("velocity_filter_tau").value)
-                alpha = self.control_dt / max(tau + self.control_dt, 1e-6)
-                raw_velocity = (positions - self._positions) / self.control_dt
-                self._velocities += alpha * (raw_velocity - self._velocities)
+                raw_velocity = (positions - self._positions) / elapsed
+                if tau > 0.0:
+                    alpha = elapsed / (tau + elapsed)
+                    self._velocities += alpha * (raw_velocity - self._velocities)
+                else:
+                    # No extra filter by default: one encoder count over one
+                    # 40 ms cycle is 0.038 rad/s, which is 1-5% of the training
+                    # sigma on every qvel channel. Filtering that adds lag the
+                    # policy never trained with and buys nothing.
+                    self._velocities = raw_velocity
             self._positions = positions
+            self._last_read_time = now
             self._have_positions = True
             self._publish_joint_states()
 
@@ -315,6 +350,8 @@ class ServoNode(Node):
 
         fault = self.safety.check_health(
             self._imu_sample, age, read_ok, self._temperatures, self._voltages)
+        if fault is None and read_ok:
+            fault = self.safety.check_tracking(self._positions, self.control_dt)
         if fault is not None:
             self._enter_fault()
             return
