@@ -414,14 +414,12 @@ class ServoNode(Node):
         servo_id = self.servo_ids[index]
         name = self.map.names[index]
 
-        temperature = self.bus.read_temperature(servo_id)
+        voltage, temperature = self.bus.read_health(servo_id)
         limit = int(self.get_parameter("max_temperature_c").value)
         if temperature is not None and temperature > limit:
             temperature = self._confirm_temperature(servo_id, name, temperature, limit)
         if temperature is not None:
             self._temperatures[name] = temperature
-
-        voltage = self.bus.read_voltage(servo_id)
         if voltage is not None:
             self._voltages[name] = voltage
 
@@ -436,7 +434,7 @@ class ServoNode(Node):
 
         Returns the temperature to record, or None to discard the sample.
         """
-        retries = [self.bus.read_temperature(servo_id) for _ in range(3)]
+        retries = [self.bus.read_health(servo_id)[1] for _ in range(3)]
         answered = [t for t in retries if t is not None]
         if answered and sum(t > limit for t in answered) >= 2:
             return max(answered)

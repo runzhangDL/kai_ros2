@@ -924,11 +924,11 @@ def test_sync_read_returns_what_it_got_when_a_servo_is_silent():
 def test_read_one_returns_the_reply_not_the_echo():
     """A READ instruction packet and a status reply have the same structure,
     so a parser that does not cut the echo reads back the address it asked
-    about and calls it data."""
-    bus = make_bus(lambda packet: _frame(packet[2], bytes([57])))
+    about and calls it data. Here the echo's payload bytes are (62, 2) -- which
+    would decode as 6.2 V and 2 C if mistaken for the reply."""
+    bus = make_bus(lambda packet: _frame(packet[2], bytes([123, 57])))
     assert bus.read_temperature(3) == 57
-
-    bus = make_bus(lambda packet: _frame(packet[2], bytes([123])))
+    bus = make_bus(lambda packet: _frame(packet[2], bytes([123, 57])))
     assert bus.read_voltage(3) == pytest.approx(12.3)
 
 
@@ -974,3 +974,26 @@ def test_no_note_when_every_joint_starts_inside():
     sup, _ = make_supervisor()
     assert sup.arm([0.0, 0.0], FakeImu(), np.zeros(48), FakePolicy()) == []
     assert sup.arm_notes == []
+
+
+def test_health_is_one_transaction_so_volts_cannot_pose_as_degrees():
+    """Voltage (62) and temperature (63) have byte-identical 1-byte replies --
+    the STS reply never echoes the address it answered. Read separately, a
+    14.0 V supply and a 140 C servo are indistinguishable downstream. Read as
+    the adjacent pair, the reply is len=4 and unambiguous."""
+    seen = []
+
+    def responder(packet):
+        seen.append((packet[5], packet[6]))       # (addr, count)
+        return _frame(packet[2], bytes([123, 41]))  # 12.3 V, 41 C
+
+    bus = make_bus(responder)
+    volts, celsius = bus.read_health(9)
+    assert volts == pytest.approx(12.3)
+    assert celsius == 41
+    assert seen == [(62, 2)], "must be a single 2-byte read at address 62"
+
+
+def test_health_returns_none_pair_when_the_servo_is_silent():
+    bus = make_bus(lambda packet: b"")
+    assert bus.read_health(4) == (None, None)

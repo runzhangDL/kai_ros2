@@ -280,13 +280,27 @@ class ServoBus:
         except Exception:  # noqa: BLE001
             return None
 
+    def read_health(self, servo_id: int) -> tuple[float | None, int | None]:
+        """``(volts, celsius)`` from ONE transaction. Voltage is 62, temp 63.
+
+        Deliberately not two 1-byte reads. The STS reply does not echo the
+        address it answered, so a 1-byte voltage reply and a 1-byte temperature
+        reply are byte-identical in structure -- id, len=3, err, value, sum.
+        Nothing downstream can tell them apart, so any cross-talk between the
+        two silently reports one as the other, and a 14.0 V supply becomes a
+        140 C servo. Reading the adjacent pair together makes the reply len=4,
+        distinct from every 1-byte read on the bus, and halves the traffic.
+        """
+        data = self._read_one(servo_id, ADDR_PRESENT_VOLTAGE, 2)
+        if data is None or len(data) != 2:
+            return None, None
+        return data[0] / 10.0, data[1]
+
     def read_temperature(self, servo_id: int) -> int | None:
-        data = self._read_one(servo_id, ADDR_PRESENT_TEMPERATURE, 1)
-        return None if data is None else data[0]
+        return self.read_health(servo_id)[1]
 
     def read_voltage(self, servo_id: int) -> float | None:
-        data = self._read_one(servo_id, ADDR_PRESENT_VOLTAGE, 1)
-        return None if data is None else data[0] / 10.0
+        return self.read_health(servo_id)[0]
 
     def ping(self, servo_id: int) -> bool:
         packet = build_packet(servo_id, _INST_PING)
