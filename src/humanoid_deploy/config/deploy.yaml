@@ -60,6 +60,12 @@
     # backstop that only bites during a recovery.
     max_joint_rate: 4.0
     arm_tilt_deg: 12.0           # must be this upright to arm
+    # How far a joint may already be outside its envelope and still be armed
+    # from. The left knee hyperextends ~3.5 deg past the model's zero, so
+    # standing on it the leg rests outside and hand-positioning cannot fix it.
+    # Commands are still clamped; only the STARTING pose gets this slack, and
+    # the ramp pulls the joint inward on the first cycle.
+    arm_pose_tolerance_deg: 5.0
     fall_tilt_deg: 40.0          # sustained tilt beyond this = FALL
     command_timeout_s: 0.20      # stale policy command = fault (5 cycles)
     ood_sigma: 6.0               # per-element z-score bound at arm time

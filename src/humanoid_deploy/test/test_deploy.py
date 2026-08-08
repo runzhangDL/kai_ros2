@@ -930,3 +930,47 @@ def test_read_one_returns_the_reply_not_the_echo():
 
     bus = make_bus(lambda packet: _frame(packet[2], bytes([123])))
     assert bus.read_voltage(3) == pytest.approx(12.3)
+
+
+def make_knee_supervisor(**overrides):
+    """A joint shaped like the real left knee: model range [-90, 0], so the
+    standing pose sits exactly on the upper limit and the physical joint can
+    rest a little past it."""
+    jm = make_map(names=("knee", "b"), lo=(-90.0, -90.0), hi=(0.0, 90.0))
+    cfg = SafetyConfig(**overrides)
+    return SafetySupervisor(jm, cfg), jm
+
+
+def test_arm_tolerates_a_joint_resting_just_outside_its_envelope():
+    """The real left knee hyperextends past the model's zero, so standing on it
+    the leg rests outside the envelope and no posing can fix that. The ramp
+    pulls it back in; refusing would mean never arming."""
+    sup, jm = make_knee_supervisor(arm_pose_tolerance_rad=np.radians(5.0))
+    assert jm.safe_upper[0] == pytest.approx(0.0)
+    assert sup.arm([np.radians(2.4), 0.0], FakeImu(), np.zeros(48), FakePolicy()) == []
+    assert sup.state is SafetyState.RAMPING
+    assert any("knee" in note and "outside" in note for note in sup.arm_notes)
+
+
+def test_a_joint_far_outside_the_envelope_still_refuses():
+    sup, _ = make_knee_supervisor(arm_pose_tolerance_rad=np.radians(5.0))
+    problems = sup.arm([np.radians(40.0), 0.0], FakeImu(), np.zeros(48), FakePolicy())
+    assert any("outside its safe range" in p for p in problems)
+    assert sup.state is SafetyState.DISARMED
+
+
+def test_the_first_command_pulls_an_outside_joint_back_in():
+    """Tolerating the start only makes sense if the command is still clamped."""
+    sup, jm = make_knee_supervisor(arm_pose_tolerance_rad=np.radians(5.0),
+                                   ramp_s=3.0, ramp_joint_rate=1.0)
+    start = np.radians(2.4)
+    sup.arm([start, 0.0], FakeImu(), np.zeros(48), FakePolicy())
+    command, _status = sup.shape([0.0, 0.0], 0.04)
+    assert command[0] <= jm.safe_upper[0] + 1e-9      # inside the envelope
+    assert command[0] < start                          # and moving inward
+
+
+def test_no_note_when_every_joint_starts_inside():
+    sup, _ = make_supervisor()
+    assert sup.arm([0.0, 0.0], FakeImu(), np.zeros(48), FakePolicy()) == []
+    assert sup.arm_notes == []

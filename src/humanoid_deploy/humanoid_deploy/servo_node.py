@@ -93,6 +93,7 @@ class ServoNode(Node):
         p("ramp_joint_rate", 1.0)
         p("fall_tilt_deg", 40.0)
         p("arm_tilt_deg", 12.0)
+        p("arm_pose_tolerance_deg", 5.0)
         p("command_timeout_s", 0.20)
         p("ood_sigma", 6.0)
         p("max_temperature_c", 65)
@@ -189,6 +190,8 @@ class ServoNode(Node):
                 ramp_joint_rate=float(self.get_parameter("ramp_joint_rate").value),
                 fall_tilt_deg=float(self.get_parameter("fall_tilt_deg").value),
                 arm_tilt_deg=float(self.get_parameter("arm_tilt_deg").value),
+                arm_pose_tolerance_rad=np.radians(
+                    float(self.get_parameter("arm_pose_tolerance_deg").value)),
                 command_timeout_s=float(self.get_parameter("command_timeout_s").value),
                 ood_sigma=float(self.get_parameter("ood_sigma").value),
                 max_temperature_c=int(self.get_parameter("max_temperature_c").value),
@@ -477,6 +480,9 @@ class ServoNode(Node):
             self.get_logger().error(text)
             response.success, response.message = False, text
             return response
+
+        for note in self.safety.arm_notes:
+            self.get_logger().warning(note)
 
         if not self.dry_run:
             self.bus.set_speed_and_acc(

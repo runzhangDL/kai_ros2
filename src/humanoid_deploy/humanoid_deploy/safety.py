@@ -81,6 +81,7 @@ class SafetyConfig:
     min_voltage_v: float = 9.5
     # preflight
     arm_tilt_deg: float = 12.0           # must be near upright to arm
+    arm_pose_tolerance_rad: float = 0.0873   # 5 deg; see preflight()
     ood_sigma: float = 6.0               # per-element z-score bound at arm time
     ood_max_elements: int = 0            # how many may exceed it
     # what to do on fault
@@ -111,6 +112,8 @@ class SafetySupervisor:
         self._freefall_strikes = 0
         self._read_failures = 0
         self._stall_seconds = np.zeros(len(joint_map.names))
+        #: Non-fatal observations from the last preflight, for the node to log.
+        self.arm_notes: list[str] = []
 
     # -- faults ------------------------------------------------------------
 
@@ -147,18 +150,41 @@ class SafetySupervisor:
                 "hold it vertical"
             )
 
+        # Two different questions get asked about the envelope, and only one of
+        # them is about the *starting* pose.
+        #
+        # Commands are clamped to it without exception -- that never relaxes.
+        # But whether the robot may be armed from slightly outside it is a
+        # separate matter, because the real machine does not stop where the
+        # model does. This robot's left knee hyperextends 3.5 deg past the
+        # model's zero, so standing on it, the leg rests against its own stop
+        # at +2.4 deg and no amount of hand-positioning changes that. Refusing
+        # to arm would mean never arming.
+        #
+        # Starting a little outside is safe in the direction that matters: the
+        # first command is clamped, so the ramp pulls the joint *inward*. What
+        # the check is really for -- a wrong calibration, a limb in the wrong
+        # pose -- is tens of degrees out, not tenths.
         measured = np.asarray(measured_rad, dtype=np.float64)
-        outside = np.nonzero(
-            (measured < self.map.safe_lower - 1e-6)
-            | (measured > self.map.safe_upper + 1e-6)
-        )[0]
-        for index in outside:
+        tolerance = max(self.cfg.arm_pose_tolerance_rad, 0.0)
+        below = self.map.safe_lower - measured
+        above = measured - self.map.safe_upper
+        excursion = np.maximum(below, above)
+
+        for index in np.nonzero(excursion > tolerance)[0]:
             problems.append(
                 f"{self.map.names[index]} is at {np.degrees(measured[index]):+.1f} deg, "
-                f"outside its safe range "
+                f"{np.degrees(excursion[index]):.1f} deg outside its safe range "
                 f"[{np.degrees(self.map.safe_lower[index]):+.1f}, "
-                f"{np.degrees(self.map.safe_upper[index]):+.1f}]"
+                f"{np.degrees(self.map.safe_upper[index]):+.1f}] "
+                f"(tolerance {np.degrees(tolerance):.1f} deg)"
             )
+
+        self.arm_notes = [
+            f"{self.map.names[i]} starts {np.degrees(excursion[i]):.1f} deg outside "
+            f"its envelope; the ramp will bring it in"
+            for i in np.nonzero((excursion > 1e-6) & (excursion <= tolerance))[0]
+        ]
 
         offenders = policy.out_of_distribution(observation, self.cfg.ood_sigma)
         if len(offenders) > self.cfg.ood_max_elements:
