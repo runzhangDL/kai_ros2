@@ -806,3 +806,127 @@ def test_nothing_is_snapped_when_the_ranges_already_agree():
     jm = make_map(names=("a",), zeros=(2048,), directions=(1,),
                   lo=(-40.0,), hi=(40.0,), action_scale=0.4)
     assert jm.snapped == []
+
+
+# =====================================================================
+# Bus transactions against a fake half-duplex port
+# =====================================================================
+
+
+class FakePort:
+    """A single-wire bus that echoes our transmit, then answers.
+
+    The echo is the whole point. This robot's circuit loops TX onto the same
+    wire RXD listens to, so every reply arrives behind a copy of the question.
+    A reader that mistakes the echo for the answer, or that stops reading once
+    it has counted the echo's bytes, looks perfectly fine until it meets real
+    hardware -- which is exactly what happened.
+    """
+
+    def __init__(self, responder, echo=True):
+        self._responder = responder
+        self._echo = echo
+        self.buf = bytearray()
+
+    def reset_input_buffer(self):
+        self.buf.clear()
+
+    def reset_output_buffer(self):
+        pass
+
+    def write(self, packet):
+        if self._echo:
+            self.buf += packet
+        self.buf += self._responder(bytes(packet))
+        return len(packet)
+
+    def flush(self):
+        pass
+
+    @property
+    def in_waiting(self):
+        return len(self.buf)
+
+    def read(self, n=1):
+        chunk = bytes(self.buf[:n])
+        del self.buf[:n]
+        return chunk
+
+    def close(self):
+        pass
+
+
+def _frame(servo_id, params=b""):
+    body = bytes([servo_id, len(params) + 2, 0]) + params
+    return b"\xff\xff" + body + bytes([(~sum(body)) & 0xFF])
+
+
+def make_bus(responder, echo=True, retries=0):
+    bus = JointlessServoBus.__new__(JointlessServoBus)
+    bus.port_name = "fake"
+    bus.baudrate = 250000
+    bus._reply_timeout = 0.05
+    bus._retries = retries
+    bus._port = FakePort(responder, echo=echo)
+    return bus
+
+
+from humanoid_deploy.servo_bus import ServoBus as JointlessServoBus  # noqa: E402
+
+
+def test_ping_succeeds_behind_its_own_echo():
+    """The bug that stopped the robot: a ping reply is 6 bytes and so is its
+    echo, so a byte-counting reader finished on the echo alone and every servo
+    looked dead on a perfectly good bus."""
+    bus = make_bus(lambda packet: _frame(packet[2]))
+    assert bus.ping(1) is True
+    assert bus.ping(13) is True
+
+
+def test_ping_fails_when_nothing_answers():
+    bus = make_bus(lambda packet: b"")
+    assert bus.ping(1) is False
+
+
+def test_ping_is_not_fooled_by_the_echo_alone():
+    """Echo but no reply must read as absent, not present."""
+    bus = make_bus(lambda packet: b"", echo=True)
+    assert bus.ping(7) is False
+
+
+def test_sync_read_collects_every_servo_behind_the_echo():
+    ids = list(range(1, 14))
+    positions = {i: 2000 + i for i in ids}
+
+    def responder(packet):
+        return b"".join(
+            _frame(i, bytes([positions[i] & 0xFF, positions[i] >> 8])) for i in ids
+        )
+
+    bus = make_bus(responder)
+    got = bus.read_positions(ids)
+    assert got == positions, f"missing {sorted(set(ids) - set(got))}"
+
+
+def test_sync_read_returns_what_it_got_when_a_servo_is_silent():
+    ids = list(range(1, 14))
+    answering = [i for i in ids if i != 9]
+
+    def responder(packet):
+        return b"".join(_frame(i, bytes([0x00, 0x08])) for i in answering)
+
+    bus = make_bus(responder)
+    got = bus.read_positions(ids)
+    assert sorted(got) == answering        # partial, and the caller sees it
+    assert 9 not in got
+
+
+def test_read_one_returns_the_reply_not_the_echo():
+    """A READ instruction packet and a status reply have the same structure,
+    so a parser that does not cut the echo reads back the address it asked
+    about and calls it data."""
+    bus = make_bus(lambda packet: _frame(packet[2], bytes([57])))
+    assert bus.read_temperature(3) == 57
+
+    bus = make_bus(lambda packet: _frame(packet[2], bytes([123])))
+    assert bus.read_voltage(3) == pytest.approx(12.3)

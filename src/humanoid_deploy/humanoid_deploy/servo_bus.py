@@ -191,15 +191,39 @@ class ServoBus:
                 time.sleep(0.0002)
         return bytes(out)
 
-    def _collect(self, expected_bytes: int, prefix: bytes, timeout: float) -> bytes:
+    def _collect_until(self, parse, prefix: bytes, timeout: float):
+        """Accumulate bytes until ``parse`` succeeds, or the deadline passes.
+
+        Terminating on a byte *count* is wrong here, and it failed on hardware:
+        the prefix is our own transmit, already drained off RXD, so counting it
+        toward the reply meant a 6-byte ping was "complete" the instant its
+        6-byte echo arrived -- before the servo had said anything. Every ping
+        returned False on a working bus.
+
+        A sync read has the same disease more subtly: its replies are only
+        nominally ``n*(6+count)`` bytes, so one stray byte on the line shifts
+        the total and silently truncates the last frames.
+
+        Parsing is the only honest termination condition, and it is what
+        ``humanoid_calibration.feetech_bus`` has always done. It also returns
+        as soon as the data is there rather than waiting out a fixed window,
+        which matters at a 24 ms cycle.
+        """
         buf = bytearray(prefix)
+        result = parse(bytes(buf))
+        if result is not None:
+            return result
         deadline = time.monotonic() + timeout
-        while len(buf) < expected_bytes and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             waiting = self._port.in_waiting
             chunk = self._port.read(waiting) if waiting else self._port.read(1)
-            if chunk:
-                buf += chunk
-        return bytes(buf)
+            if not chunk:
+                continue
+            buf += chunk
+            result = parse(bytes(buf))
+            if result is not None:
+                return result
+        return None
 
     # -- reads -------------------------------------------------------------
 
@@ -211,18 +235,29 @@ class ServoBus:
         # Airtime for all the replies, plus per-servo turnaround, plus slack.
         window = (expected * 10.0) / self.baudrate + 0.0004 * len(ids) + self._reply_timeout
 
+        frames: dict[int, bytes] = {}
+
+        def parse(buf):
+            # Keep the best partial result: a servo that answered late is still
+            # better than nothing, and the caller reports a short read as a
+            # failed cycle rather than pretending it is fresh.
+            nonlocal frames
+            found = parse_sync_read(buf, ids, count, packet)
+            if len(found) > len(frames):
+                frames = found
+            return found if len(found) == len(ids) else None
+
         for attempt in range(self._retries + 1):
             try:
                 self._port.reset_input_buffer()
                 self._port.write(packet)
                 self._port.flush()
                 echo = self._drain_echo(len(packet))
-                buf = self._collect(expected, echo, window)
-                frames = parse_sync_read(buf, ids, count, packet)
+                complete = self._collect_until(parse, echo, window)
             except Exception:  # noqa: BLE001 - a flaky bus must not kill the loop
-                frames = {}
-            if len(frames) == len(ids):
-                return frames
+                complete = None
+            if complete is not None:
+                return complete
             if attempt < self._retries:
                 time.sleep(0.001)
         return frames
@@ -239,8 +274,9 @@ class ServoBus:
             self._port.write(packet)
             self._port.flush()
             echo = self._drain_echo(len(packet))
-            buf = self._collect(6 + count, echo, self._reply_timeout)
-            return parse_status_frame(buf, servo_id, count, packet)
+            return self._collect_until(
+                lambda buf: parse_status_frame(buf, servo_id, count, packet),
+                echo, self._reply_timeout)
         except Exception:  # noqa: BLE001
             return None
 
@@ -259,8 +295,11 @@ class ServoBus:
             self._port.write(packet)
             self._port.flush()
             echo = self._drain_echo(len(packet))
-            buf = self._collect(6, echo, self._reply_timeout)
-            return parse_status_frame(buf, servo_id, 0, packet) is not None
+            # A ping reply carries no parameter bytes, so a successful parse
+            # returns b"" -- falsy but not None. Test against None, not truth.
+            return self._collect_until(
+                lambda buf: parse_status_frame(buf, servo_id, 0, packet),
+                echo, self._reply_timeout) is not None
         except Exception:  # noqa: BLE001
             return False
 
