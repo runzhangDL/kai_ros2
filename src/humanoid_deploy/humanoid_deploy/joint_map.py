@@ -29,6 +29,13 @@ import numpy as np
 
 TWO_PI = 2.0 * np.pi
 
+#: How far a joint's measured travel may miss the policy's nominal pose before
+#: it is treated as a genuine zero disagreement. A sweep endpoint landing a
+#: fraction of a degree short is measurement noise -- the calibration's own
+#: reach tolerance is 1 deg and one encoder count is 0.088 deg. A flipped
+#: direction or a zero taken in the wrong pose is tens of degrees.
+NOMINAL_TOLERANCE_RAD = np.radians(3.0)
+
 
 class JointMapError(Exception):
     """Raised when the policy and the calibration cannot be reconciled."""
@@ -144,7 +151,7 @@ class JointMap:
 
     def __init__(self, joint_names, calibrations, xml_lower, xml_upper,
                  action_scale, limit_margin_rad=0.0, default_pose=None,
-                 aliases=None):
+                 aliases=None, nominal_tolerance_rad=NOMINAL_TOLERANCE_RAD):
         """
         :param joint_names: policy joint names, in MuJoCo order.
         :param calibrations: ``{name: JointCalibration}`` from the calibration store.
@@ -154,6 +161,9 @@ class JointMap:
             except where that would exclude the nominal pose (see below).
         :param default_pose: the policy's target pose, 0 rad per joint for this
             env. Defaults to zeros.
+        :param nominal_tolerance_rad: how far the measured range may miss the
+            nominal pose before that counts as a real zero disagreement rather
+            than sweep imprecision.
         """
         self.names = list(joint_names)
         n = len(self.names)
@@ -204,22 +214,46 @@ class JointMap:
         hard_lower = np.maximum(calib_lower, self.xml_lower)
         hard_upper = np.minimum(calib_upper, self.xml_upper)
 
-        outside = np.nonzero(
-            (self.default_pose < hard_lower - 1e-9)
-            | (self.default_pose > hard_upper + 1e-9)
-        )[0]
-        if outside.size:
+        # A joint may end up a hair "outside" its own measured range, because the
+        # two numbers come from different measurements of different quality. The
+        # zero is set deliberately: the operator aligns the link vertically and
+        # presses a key. The min/max are captured by sweeping to a target and
+        # auto-recording within a degree. So when a sweep endpoint lands a
+        # fraction of a degree the wrong side of the zero, it is the sweep that
+        # is imprecise, not the zero -- and refusing to run over two encoder
+        # counts would be absurd. Absorb that, and record it for the log.
+        #
+        # A real zero disagreement -- a flipped direction, a zero taken in the
+        # wrong pose -- is tens of degrees, and stays fatal.
+        gap_low = hard_lower - self.default_pose
+        gap_high = self.default_pose - hard_upper
+        worst = np.maximum(gap_low, gap_high)
+
+        fatal = np.nonzero(worst > nominal_tolerance_rad)[0]
+        if fatal.size:
             details = ", ".join(
                 f"{self.names[i]} (nominal {np.degrees(self.default_pose[i]):+.1f} deg "
                 f"vs [{np.degrees(hard_lower[i]):+.1f}, "
-                f"{np.degrees(hard_upper[i]):+.1f}])"
-                for i in outside
+                f"{np.degrees(hard_upper[i]):+.1f}], off by "
+                f"{np.degrees(worst[i]):.1f} deg)"
+                for i in fatal
             )
             raise JointMapError(
                 "the policy's nominal pose lies outside the allowed range for: "
                 f"{details}.\nThe calibration and the trained model disagree "
-                "about where this joint's zero is."
+                "about where this joint's zero is. Re-check the joint's "
+                "`direction` in joint_limits.yaml and recalibrate it:\n"
+                "  ros2 run humanoid_calibration calibrate --only <joint> --force"
             )
+
+        #: Joints whose measured range missed the nominal pose by less than the
+        #: tolerance, and were widened to include it. Informational.
+        snapped = np.nonzero((worst > 1e-9) & (worst <= nominal_tolerance_rad))[0]
+        self.snapped = [
+            (self.names[i], float(np.degrees(worst[i]))) for i in snapped
+        ]
+        hard_lower = np.minimum(hard_lower, self.default_pose)
+        hard_upper = np.maximum(hard_upper, self.default_pose)
 
         # The margin must never exclude the nominal pose. A joint whose standing
         # position is legitimately *at* an endpoint -- a knee that cannot

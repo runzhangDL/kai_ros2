@@ -155,6 +155,13 @@ class ServoNode(Node):
         except JointMapError as exc:
             raise SystemExit(f"joint mapping failed:\n{exc}") from exc
         self.get_logger().info("joint map:\n" + self.map.describe())
+        if self.map.snapped:
+            self.get_logger().info(
+                "these joints' measured travel missed the standing pose by a "
+                "fraction of a degree and was widened to include it: "
+                + ", ".join(f"{name} ({gap:.2f} deg)"
+                            for name, gap in self.map.snapped)
+            )
         if self.map.unmargined:
             self.get_logger().warning(
                 "these joints stand on (or within the safety margin of) a hard "

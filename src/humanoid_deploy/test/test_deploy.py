@@ -779,3 +779,30 @@ def test_a_centred_zero_has_no_seam_violation_at_either_scope():
     jm = make_map(names=("a",), zeros=(2048,), directions=(1,),
                   lo=(-88.0,), hi=(88.0,), action_scale=0.4)
     assert jm.seam_violations() == []
+
+
+def test_a_sweep_that_misses_the_nominal_pose_by_a_hair_is_absorbed():
+    """Two encoder counts of measurement noise must not ground the robot.
+
+    The zero is set deliberately (operator aligns the link and presses a key);
+    the min/max are swept to within a degree. When the sweep endpoint lands
+    just the wrong side of the zero, the sweep is what is imprecise.
+    """
+    jm = make_map(names=("a",), zeros=(2026,), directions=(1,),
+                  lo=(0.18,), hi=(89.12,), action_scale=0.4)
+    assert jm.safe_lower[0] == pytest.approx(0.0)          # nominal is included
+    assert [name for name, _ in jm.snapped] == ["a"]
+    assert jm.snapped[0][1] == pytest.approx(0.18, abs=0.01)
+
+
+def test_a_real_zero_disagreement_is_still_fatal():
+    """A flipped direction or a zero taken in the wrong pose is tens of degrees."""
+    with pytest.raises(JointMapError, match="nominal pose"):
+        make_map(names=("a",), zeros=(2048,), directions=(1,),
+                 lo=(20.0,), hi=(89.0,), action_scale=0.4)
+
+
+def test_nothing_is_snapped_when_the_ranges_already_agree():
+    jm = make_map(names=("a",), zeros=(2048,), directions=(1,),
+                  lo=(-40.0,), hi=(40.0,), action_scale=0.4)
+    assert jm.snapped == []
