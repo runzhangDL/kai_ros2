@@ -249,6 +249,12 @@ class ServoNode(Node):
         # --- ROS interfaces -------------------------------------------------
         self._state_pub = self.create_publisher(
             JointState, "/humanoid/joint_states", _SENSOR_QOS)
+        # What would actually be written, after clamping, ramping and rate
+        # limiting -- all 13 joints at full precision. The log line truncates to
+        # six and rounds to 0.1 deg, which is not enough to check by eye before
+        # energising, and not recordable with `ros2 bag`.
+        self._command_pub = self.create_publisher(
+            JointState, "~/command", _SENSOR_QOS)
         self._status_pub = self.create_publisher(String, "~/status", _LATCHED)
         self.create_subscription(
             JointState, "/humanoid_policy/joint_command", self._on_command, _SENSOR_QOS)
@@ -382,6 +388,13 @@ class ServoNode(Node):
 
     def _write(self, command_rad: np.ndarray) -> None:
         counts = self.map.rad_to_counts(command_rad)
+
+        shaped = JointState()
+        shaped.header.stamp = self.get_clock().now().to_msg()
+        shaped.name = list(self.map.names)
+        shaped.position = [float(v) for v in command_rad]
+        self._command_pub.publish(shaped)
+
         if self.dry_run:
             if self._cycle % 50 == 0:
                 self.get_logger().info(
