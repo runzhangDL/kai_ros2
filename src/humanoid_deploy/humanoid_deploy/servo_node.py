@@ -413,12 +413,40 @@ class ServoNode(Node):
         index = (self._cycle // 10) % len(self.servo_ids)
         servo_id = self.servo_ids[index]
         name = self.map.names[index]
+
         temperature = self.bus.read_temperature(servo_id)
+        limit = int(self.get_parameter("max_temperature_c").value)
+        if temperature is not None and temperature > limit:
+            temperature = self._confirm_temperature(servo_id, name, temperature, limit)
         if temperature is not None:
             self._temperatures[name] = temperature
+
         voltage = self.bus.read_voltage(servo_id)
         if voltage is not None:
             self._voltages[name] = voltage
+
+    def _confirm_temperature(self, servo_id, name, first, limit):
+        """Re-read before believing an over-limit temperature.
+
+        A single corrupted frame that happens to pass its checksum would
+        otherwise stop the robot dead, and each servo is only polled every few
+        seconds, so one bad byte costs a whole run. Meanwhile a servo that is
+        genuinely cooking will still be cooking three milliseconds later -- so
+        confirming costs nothing real and rules out the bus.
+
+        Returns the temperature to record, or None to discard the sample.
+        """
+        retries = [self.bus.read_temperature(servo_id) for _ in range(3)]
+        answered = [t for t in retries if t is not None]
+        if answered and sum(t > limit for t in answered) >= 2:
+            return max(answered)
+        self.get_logger().warning(
+            f"discarding an implausible temperature for {name}: {first} C "
+            f"(limit {limit}); immediate re-reads were {retries}. This is a bus "
+            "glitch, not a hot servo -- but check it by hand if it repeats: "
+            f"python3 tools/sts_tool.py --baud 250000 reg {servo_id} 63"
+        )
+        return None
 
     # -- publishing --------------------------------------------------------
 

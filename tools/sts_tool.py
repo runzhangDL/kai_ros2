@@ -300,6 +300,30 @@ def cmd_pos(bus, args):
     print(f"id={args.id} pos={p}")
 
 
+def cmd_reg(bus, args):
+    """Read any register, raw. Diagnostic only -- this never writes.
+
+    Useful when a ROS node reports something implausible and you need to know
+    whether the servo really said it. Temperature is 63, voltage 62, present
+    position 56.
+    """
+    ids = [int(x) for x in args.ids.split(",")]
+    for sid in ids:
+        values = []
+        for _ in range(args.count):
+            data = bus.read(sid, args.addr, args.size)
+            if data is None:
+                values.append(None)
+            elif args.size == 2:
+                values.append(data[0] | (data[1] << 8))
+            else:
+                values.append(data[0])
+        good = [v for v in values if v is not None]
+        spread = f"{min(good)}..{max(good)}" if good else "no reply"
+        print(f"  id{sid:>3}  addr {args.addr:>3}  reads {values}  range {spread}")
+    print("\n(disagreeing reads mean a flaky bus, not a changing register)")
+
+
 def cmd_torque(bus, args):
     bus.write1(args.id, REG_TORQUE, args.on)
     print(f"id={args.id} torque={'on' if args.on else 'off'}")
@@ -379,6 +403,11 @@ def main():
     s.add_argument("--acc", type=int, default=50); s.set_defaults(f=cmd_move)
 
     s = sub.add_parser("pos"); s.add_argument("id", type=int); s.set_defaults(f=cmd_pos)
+
+    s = sub.add_parser("reg", help="read a register repeatedly (read-only)")
+    s.add_argument("ids"); s.add_argument("addr", type=int)
+    s.add_argument("--size", type=int, default=1, choices=[1, 2])
+    s.add_argument("--count", type=int, default=5); s.set_defaults(f=cmd_reg)
 
     s = sub.add_parser("torque"); s.add_argument("id", type=int)
     s.add_argument("on", type=int, choices=[0, 1]); s.set_defaults(f=cmd_torque)
