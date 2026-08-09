@@ -86,7 +86,11 @@ def analyse(trace, start, target):
             rise = t - t0
             break
     final = (trace[-1][1] - target) / DEG
-    return peak, rise, final, len(trace) / (trace[-1][0] - t0)
+    # How much of the commanded step it actually completed. A servo that stops
+    # short is not slow, it is out of torque -- with a proportional position
+    # loop the residual error is load/kp, and it never closes.
+    reached = 100.0 * (trace[-1][1] - start) / span
+    return peak, rise, final, len(trace) / (trace[-1][0] - t0), reached
 
 
 def main():
@@ -151,14 +155,17 @@ def main():
         if result is None:
             print("not enough samples -- is the bus healthy?")
         else:
-            peak, rise, final, rate = result
+            peak, rise, final, rate, reached = result
             print(f"  sampled at        {rate:.0f} Hz ({len(trace)} reads)")
             print(f"  peak speed        {peak:.0f} deg/s "
                   f"({peak / 360 * 60:.0f} rpm)")
             print(f"  goal speed cap    {args.speed / DEG:.0f} deg/s")
-            print(f"  90% rise time     "
-                  f"{'never reached' if rise is None else f'{rise * 1000:.0f} ms'}")
-            print(f"  final error       {final:+.2f} deg")
+            print(f"  step completed    {reached:.0f}%")
+            when = f"{rise * 1000:.0f} ms" if rise is not None \
+                else "n/a -- stalled short of 90%"
+            print(f"  90% rise time     {when}")
+            print(f"  final error       {final:+.2f} deg "
+                  f"(residual load/kp error; this does not close)")
             print(f"\n  at 25 Hz one control cycle is 40 ms, so this joint can "
                   f"move about {peak * 0.04:.1f} deg per cycle.")
             if peak < 0.5 * args.speed / DEG:
