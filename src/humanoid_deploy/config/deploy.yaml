@@ -89,7 +89,13 @@
     # -- the policy asks for ~9 rad/s there. Raise it toward 3000 only after
     # the robot has stood quietly on a gantry, and expect it to move faster.
     servo_goal_speed: 2000       # counts/s (~176 deg/s)
-    servo_acc: 30
+    # Acc is in units of 100 counts/s^2, so this is 10000 counts/s^2. Measured
+    # on the robot with tools/servo_step.py: the hip can only produce about
+    # 4300 counts/s^2 (6.6 rad/s^2) against the leg's inertia, so anything
+    # above ~50 here is not the binding constraint. The old default of 30
+    # (3000 counts/s^2) WAS binding, and throttled every run: 59 deg/s instead
+    # of 73 on a 15 deg step, with a 25% longer rise time.
+    servo_acc: 100
     # 0.0 = no extra filter. At 25 Hz one encoder count over one cycle is
     # 0.038 rad/s, i.e. 1-5% of the training sigma on every qvel channel, so
     # there is nothing worth filtering and a filter would only add lag.

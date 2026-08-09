@@ -64,8 +64,23 @@ def sample(bus, servo_id, seconds):
     return out
 
 
-def analyse(trace, start, target):
-    """Peak speed, 90% rise time, final error -- all in degrees."""
+def analyse(trace, start, target, ceiling_deg_s):
+    """Speed, acceleration, rise time and residual error -- all in degrees.
+
+    Peak speed is NOT max(), because this bus occasionally returns a corrupted
+    frame that still passes its checksum. Differentiating one bad position
+    sample invents an arbitrarily large velocity -- it produced a 491 deg/s
+    reading on a servo whose datasheet no-load speed is 270. Samples implying
+    motion faster than the servo can physically turn are discarded, and the
+    quoted peak is the 95th percentile of what survives.
+
+    The acceleration estimate does not depend on differentiating at all. For an
+    acceleration-limited (triangular) move, 90% of the distance is covered at
+    t90 = 1.553*sqrt(d/a), so a = d*(1.553/t90)^2 -- a single robust number
+    from one timing measurement. Because peak speed is then sqrt(a*d), it grows
+    with the size of the move: a joint that manages 73 deg/s over 15 degrees
+    will manage far more over 40.
+    """
     if len(trace) < 5:
         return None
     t0 = trace[0][0]
@@ -73,24 +88,34 @@ def analyse(trace, start, target):
     if abs(span) < 1:
         return None
 
-    speeds = []
+    speeds, dropped = [], 0
     for (ta, pa), (tb, pb) in zip(trace, trace[1:]):
         dt = tb - ta
-        if dt > 1e-4:
-            speeds.append(abs(pb - pa) / dt / DEG)
-    peak = max(speeds) if speeds else 0.0
+        if dt <= 1e-4:
+            continue
+        v = abs(pb - pa) / dt / DEG
+        if v > ceiling_deg_s:
+            dropped += 1
+            continue
+        speeds.append(v)
+    speeds.sort()
+    peak = speeds[int(0.95 * (len(speeds) - 1))] if speeds else 0.0
 
     rise = None
     for t, p in trace:
         if abs(p - start) >= 0.9 * abs(span):
             rise = t - t0
             break
+
+    accel = implied = None
+    if rise and rise > 1e-3:
+        accel = abs(span) * (1.553 / rise) ** 2        # counts/s^2
+        implied = (accel * abs(span)) ** 0.5 / DEG     # deg/s
+
     final = (trace[-1][1] - target) / DEG
-    # How much of the commanded step it actually completed. A servo that stops
-    # short is not slow, it is out of torque -- with a proportional position
-    # loop the residual error is load/kp, and it never closes.
     reached = 100.0 * (trace[-1][1] - start) / span
-    return peak, rise, final, len(trace) / (trace[-1][0] - t0), reached
+    rate = len(trace) / (trace[-1][0] - t0)
+    return peak, rise, final, rate, reached, accel, implied, dropped
 
 
 def main():
@@ -107,6 +132,10 @@ def main():
     parser.add_argument("--acc", type=int, default=30)
     parser.add_argument("--settle", type=float, default=1.5,
                         help="seconds to record after the step")
+    parser.add_argument("--no-load-speed", type=float, default=280.0,
+                        help="datasheet no-load speed in deg/s; samples implying "
+                             "anything faster are corrupted reads (STS3215 is "
+                             "0.222 s/60 deg = 270 deg/s)")
     args = parser.parse_args()
 
     bus = Bus(args.port, args.baud)
@@ -151,14 +180,15 @@ def main():
                    args.speed & 0xFF, (args.speed >> 8) & 0xFF])
         trace = sample(bus, args.id, args.settle)
 
-        result = analyse(trace, start, target)
+        result = analyse(trace, start, target, args.no_load_speed)
         if result is None:
             print("not enough samples -- is the bus healthy?")
         else:
-            peak, rise, final, rate, reached = result
-            print(f"  sampled at        {rate:.0f} Hz ({len(trace)} reads)")
+            peak, rise, final, rate, reached, accel, implied, dropped = result
+            print(f"  sampled at        {rate:.0f} Hz ({len(trace)} reads"
+                  + (f", {dropped} impossible ones discarded)" if dropped else ")"))
             print(f"  peak speed        {peak:.0f} deg/s "
-                  f"({peak / 360 * 60:.0f} rpm)")
+                  f"({peak / 360 * 60:.0f} rpm)   [95th pct]")
             print(f"  goal speed cap    {args.speed / DEG:.0f} deg/s")
             print(f"  step completed    {reached:.0f}%")
             when = f"{rise * 1000:.0f} ms" if rise is not None \
@@ -166,11 +196,18 @@ def main():
             print(f"  90% rise time     {when}")
             print(f"  final error       {final:+.2f} deg "
                   f"(residual load/kp error; this does not close)")
-            print(f"\n  at 25 Hz one control cycle is 40 ms, so this joint can "
-                  f"move about {peak * 0.04:.1f} deg per cycle.")
+            if accel is not None:
+                print(f"\n  acceleration      {accel / DEG:.0f} deg/s^2 "
+                      f"= {accel / DEG * 3.14159 / 180:.1f} rad/s^2")
+                print(f"  implied peak      {implied:.0f} deg/s for this "
+                      f"{abs(target-start)/DEG:.0f} deg move")
+                print(f"  This is the number to design a gait around. Peak speed "
+                      f"scales as sqrt(a*distance),\n  so a 30 deg swing would "
+                      f"reach {(accel * 30 * DEG) ** 0.5 / DEG:.0f} deg/s "
+                      f"and take {2 * (30 * DEG / accel) ** 0.5 * 1000:.0f} ms.")
             if peak < 0.5 * args.speed / DEG:
-                print("  NOTE: peak speed is less than half the goal-speed cap, "
-                      "so load or torque is the limit here, not the register.")
+                print("\n  NOTE: peak is well under the goal-speed cap, so "
+                      "acceleration or torque is the limit, not the register.")
 
         bus.write(args.id, REG_GOAL_POS,
                   [start & 0xFF, start >> 8, 0, 0, 0xB8, 0x0B])
