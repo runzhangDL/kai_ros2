@@ -94,6 +94,9 @@ def main():
     parser.add_argument("--acc", type=int, default=100)
     parser.add_argument("--dry-run", action="store_true",
                         help="compute and report, write nothing to the servos")
+    parser.add_argument("--save", metavar="FILE.npz",
+                        help="write the commanded/measured traces, so an "
+                             "actuator model can be fitted to them offline")
     args = parser.parse_args()
 
     names, ref, fps = load_reference(args.bundle, args.motion)
@@ -220,6 +223,14 @@ def main():
             lag = f"{best} cyc"
         print(f"{n:<26}{cmd[:,i].min():>7.1f}..{cmd[:,i].max():<7.1f}"
               f"{rms:>9.2f}{peak:>10.2f}{lag:>8}")
+
+    if args.save:
+        np.savez(args.save,
+                 t=np.array([t for t, _, _ in log]),
+                 commanded_deg=cmd, measured_deg=meas,
+                 joint_names=np.array(names),
+                 speed=args.speed, rate=args.rate, period=period)
+        print(f"\nwrote {args.save} ({len(log)} samples x {len(names)} joints)")
 
     moving = [i for i in range(len(names)) if cmd[:, i].max() - cmd[:, i].min() > 2.0]
     worst = max(float(np.sqrt(np.mean(err[:, i] ** 2))) for i in moving)
