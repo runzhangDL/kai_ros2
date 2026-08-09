@@ -44,23 +44,31 @@ from humanoid_calibration.calibration_store import CalibrationStore  # noqa: E40
 from humanoid_deploy.servo_bus import ServoBus  # noqa: E402
 
 
-def load_reference(xml_path, motion_path):
+def load_reference(bundle_path, motion_path):
     """Reference joint angles in ACTUATOR order, clipped to the model limits.
 
     Mirrors mjx_walk_env exactly: the npz stores joints in its own order, the
     env reindexes to actuator order and clips to jnt_range so the target is
     physically reachable. Any difference here would replay a trajectory the
     policy was never trained against.
+
+    The joint order and the limits come from the exported policy bundle rather
+    than from robot.xml, so this runs on the robot with nothing but numpy --
+    mujoco is a training-machine dependency and has no business on a Jetson.
+    The bundle carries both because they were read out of the same XML at
+    export time.
     """
-    import mujoco
-    mj = mujoco.MjModel.from_xml_path(xml_path)
-    names = [mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
-             for i in range(mj.nu)]
-    jid = mj.actuator_trnid[:, 0]
-    lo, hi = mj.jnt_range[jid, 0], mj.jnt_range[jid, 1]
+    from humanoid_deploy.policy import Policy
+    policy = Policy(bundle_path)
+    names = list(policy.joint_names)
+    lo, hi = policy.xml_lower, policy.xml_upper
 
     motion = np.load(motion_path, allow_pickle=True)
-    col = [list(motion["dof_names"]).index(n) for n in names]
+    npz_names = list(motion["dof_names"])
+    missing = [n for n in names if n not in npz_names]
+    if missing:
+        raise SystemExit(f"the motion file has no column for {missing}")
+    col = [npz_names.index(n) for n in names]
     ref = np.clip(motion["dof_positions"][:, col], lo, hi)
     return names, np.asarray(ref, dtype=np.float64), float(motion["fps"])
 
@@ -71,10 +79,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", default="/dev/ttyTHS1")
     parser.add_argument("--baud", type=int, default=250000)
-    parser.add_argument("--xml", default=os.path.expanduser(
-        "~/Project/robot_mujoco/robot/robot.xml"))
-    parser.add_argument("--motion", default=os.path.expanduser(
-        "~/Project/robot_mujoco/biped_walk_amp.npz"))
+    parser.add_argument("--bundle", default=os.path.join(
+        _SRC, "humanoid_deploy", "models", "policy_bundle.npz"),
+        help="any exported bundle -- only its joint order and limits are used")
+    parser.add_argument("--motion", default=os.path.join(
+        _SRC, "humanoid_deploy", "models", "biped_walk_amp.npz"))
     parser.add_argument("--speed", type=float, default=0.6,
                         help="motion_speed, as passed to the trainer")
     parser.add_argument("--rate", type=float, default=25.0)
@@ -87,7 +96,7 @@ def main():
                         help="compute and report, write nothing to the servos")
     args = parser.parse_args()
 
-    names, ref, fps = load_reference(args.xml, args.motion)
+    names, ref, fps = load_reference(args.bundle, args.motion)
     n_cycle = ref.shape[0] - 1
     period = n_cycle / (fps * args.speed)
     dt = 1.0 / args.rate
