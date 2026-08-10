@@ -997,3 +997,269 @@ def test_health_is_one_transaction_so_volts_cannot_pose_as_degrees():
 def test_health_returns_none_pair_when_the_servo_is_silent():
     bus = make_bus(lambda packet: b"")
     assert bus.read_health(4) == (None, None)
+
+
+# =====================================================================
+# The safety margin belongs to the calibrated limit, not the model's
+# =====================================================================
+
+
+def test_margin_is_not_taken_off_a_model_limit():
+    """The margin protects against a physical hard stop; only the calibration
+    knows where one is. The XML limit is a software bound this code already
+    honours exactly, so shrinking inside it would clip travel the policy needs
+    while protecting nothing. The real case is right_ankle_pitch, whose walking
+    nominal pose sits exactly on its model limit."""
+    jm = make_map(lo=(-40.0, -40.0), hi=(25.0, 25.0), margin=np.radians(2.0))
+    # Calibration and model agree here, so the margin does apply.
+    assert np.degrees(jm.safe_lower[0]) == pytest.approx(-38.0)
+
+    # Now make the model strictly tighter than the measured travel.
+    cals = {"a": make_cal("a", 1, 2048, -40.0, 25.0, 1)}
+    jm = JointMap(["a"], cals, xml_lower=[np.radians(-20.0)],
+                  xml_upper=[np.radians(20.0)], action_scale=0.4,
+                  limit_margin_rad=np.radians(2.0))
+    assert np.degrees(jm.safe_lower[0]) == pytest.approx(-20.0)
+    assert np.degrees(jm.safe_upper[0]) == pytest.approx(20.0)
+
+
+def test_margin_still_applies_where_the_calibration_is_the_tighter_bound():
+    cals = {"a": make_cal("a", 1, 2048, -10.0, 10.0, 1)}
+    jm = JointMap(["a"], cals, xml_lower=[np.radians(-90.0)],
+                  xml_upper=[np.radians(90.0)], action_scale=0.4,
+                  limit_margin_rad=np.radians(2.0))
+    assert np.degrees(jm.safe_lower[0]) == pytest.approx(-8.0)
+    assert np.degrees(jm.safe_upper[0]) == pytest.approx(8.0)
+
+
+def test_command_window_follows_a_non_zero_nominal_pose():
+    """The walking policy's residual is about a crouch, not about 0 rad.
+    Centring its window on zero would understate a knee's reach by 40 deg --
+    exactly the error the seam check exists to catch."""
+    cals = {"knee": make_cal("knee", 1, 2048, -90.0, 0.0, 1)}
+    nominal = np.radians(-40.3)
+    jm = JointMap(["knee"], cals, xml_lower=[np.radians(-90.0)],
+                  xml_upper=[0.0], action_scale=0.4, default_pose=[nominal])
+    lo, hi = jm.command_window()
+    assert np.degrees(lo[0]) == pytest.approx(-63.2, abs=0.1)
+    assert np.degrees(hi[0]) == pytest.approx(-17.4, abs=0.1)
+
+
+def test_a_crouched_nominal_pose_near_the_seam_is_caught():
+    """Zero at count 300 leaves room for +/-0.4 rad about 0 but not about a
+    -40 deg crouch, which reaches 1019 counts the other way."""
+    cals = {"knee": make_cal("knee", 1, 300, -90.0, 0.0, 1)}
+    jm = JointMap(["knee"], cals, xml_lower=[np.radians(-90.0)],
+                  xml_upper=[0.0], action_scale=0.4,
+                  default_pose=[np.radians(-40.3)])
+    violations = jm.seam_violations()
+    assert violations and violations[0].name == "knee"
+
+
+# =====================================================================
+# Gait sequencer
+# =====================================================================
+
+from humanoid_deploy.gait import (  # noqa: E402
+    GaitConfig,
+    GaitError,
+    GaitMode,
+    GaitSequencer,
+)
+
+NOMINAL = np.radians([23.4, 0, 0, -40.3, 0, 16.9, 0, -22.6, 0, 0, 42.6, 0, -20.0])
+STAND_TARGET = np.zeros(13)
+WALK_TARGET = NOMINAL + 0.1
+
+
+def make_seq(**overrides):
+    defaults = dict(control_dt=0.04, crouch_s=1.0, settle_s=0.2,
+                    walk_duration_s=1.0, recover_s=1.0)
+    return GaitSequencer(GaitConfig(**{**defaults, **overrides}), NOMINAL)
+
+
+def drive(seq, cycles, stand=STAND_TARGET, walk=WALK_TARGET):
+    """Run cycles, supplying the walking target only when it is asked for."""
+    out = []
+    for _ in range(cycles):
+        target, status = seq.step(stand, walk if seq.walking else None)
+        out.append((target.copy(), status))
+    return out
+
+
+def test_a_zero_velocity_command_is_refused():
+    """cmd_vx = 0 was never trained -- zero_cmd_prob defaulted to 0 -- so it is
+    not a stop command, however much it looks like one. The trainer's sidecar
+    claims otherwise; the bundle records the corrected range."""
+    with pytest.raises(GaitError, match="not a stop command"):
+        make_seq(cmd_vx=0.0)
+
+
+def test_a_too_fast_command_is_refused():
+    with pytest.raises(GaitError, match="outside the trained range"):
+        make_seq(cmd_vx=0.5)
+
+
+def test_lateral_command_is_refused():
+    with pytest.raises(GaitError, match="never trained non-zero"):
+        make_seq(cmd_vy=0.05)
+
+
+def test_it_starts_and_stays_standing():
+    seq = make_seq()
+    for target, status in drive(seq, 10):
+        assert status.mode is GaitMode.STAND
+        assert np.allclose(target, STAND_TARGET)
+        assert status.walk_authority == 0.0
+
+
+def test_the_full_sequence_visits_every_mode_and_returns_to_standing():
+    seq = make_seq()
+    assert seq.request_walk()[0]
+    seen = [status.mode for _, status in drive(seq, 200)]
+    assert GaitMode.TO_CROUCH in seen
+    assert GaitMode.SETTLE in seen
+    assert GaitMode.WALK in seen
+    assert GaitMode.TO_STAND in seen
+    assert seen[-1] is GaitMode.STAND
+    assert seq.last_exit == "walk duration reached"
+
+
+def test_the_crouch_ends_exactly_on_the_nominal_pose():
+    seq = make_seq()
+    seq.request_walk()
+    last = None
+    for target, status in drive(seq, 40):
+        if status.mode is GaitMode.SETTLE:
+            last = target
+            break
+    assert last is not None and np.allclose(last, NOMINAL)
+
+
+def test_the_walking_policy_is_told_when_its_cold_start_is():
+    """The node zeroes last_action on this flag; it must fire exactly once, on
+    the cycle the walking policy first has authority."""
+    seq = make_seq()
+    seq.request_walk()
+    starts = [i for i, (_, s) in enumerate(drive(seq, 200)) if s.walk_started]
+    assert len(starts) == 1
+
+
+def test_the_clock_only_runs_once_walking():
+    seq = make_seq()
+    seq.request_walk()
+    phases = []
+    for _, status in drive(seq, 40):
+        phases.append((status.mode, status.phase))
+    assert all(p == 0.0 for mode, p in phases
+               if mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE))
+    assert any(p > 0.0 for mode, p in phases if mode is GaitMode.WALK)
+
+
+def test_a_stop_request_returns_to_standing_early():
+    seq = make_seq(walk_duration_s=60.0)
+    seq.request_walk()
+    drive(seq, 40)
+    assert seq.mode is GaitMode.WALK
+    assert seq.request_stop("Ctrl-C")[0]
+    modes = [s.mode for _, s in drive(seq, 100)]
+    assert modes[-1] is GaitMode.STAND
+    assert seq.last_exit == "Ctrl-C"
+
+
+def test_stopping_during_the_crouch_abandons_it():
+    """Ctrl-C on the way down has no walking policy to hand back from, so it
+    goes straight to the standing policy."""
+    seq = make_seq()
+    seq.request_walk()
+    drive(seq, 5)
+    assert seq.mode is GaitMode.TO_CROUCH
+    seq.request_stop("Ctrl-C")
+    target, status = seq.step(STAND_TARGET, None)
+    assert status.mode is GaitMode.TO_STAND
+    modes = [s.mode for _, s in drive(seq, 60)]
+    assert modes[-1] is GaitMode.STAND
+
+
+def test_the_first_stop_reason_is_the_one_kept():
+    seq = make_seq(walk_duration_s=60.0)
+    seq.request_walk()
+    drive(seq, 40)
+    seq.request_stop("tilt 25.0 deg")
+    seq.request_stop("Ctrl-C")
+    drive(seq, 100)
+    assert seq.last_exit == "tilt 25.0 deg"
+
+
+def test_the_handback_ends_under_the_standing_policy_alone():
+    seq = make_seq(walk_duration_s=0.4)
+    seq.request_walk()
+    results = drive(seq, 200)
+    finished = [i for i, (_, s) in enumerate(results) if s.walk_finished]
+    assert len(finished) == 1
+    target, status = results[finished[0]]
+    assert status.walk_authority == pytest.approx(0.0)
+    assert np.allclose(target, STAND_TARGET)
+
+
+def test_walk_is_refused_while_already_walking():
+    seq = make_seq()
+    assert seq.request_walk()[0]
+    drive(seq, 5)
+    ok, message = seq.request_walk()
+    assert not ok and "already" in message
+
+
+def test_the_walking_policy_is_only_evaluated_when_it_is_needed():
+    seq = make_seq()
+    assert not seq.walking
+    seq.request_walk()
+    drive(seq, 5)
+    assert not seq.walking          # 'ramp' style: the crouch is open loop
+    drive(seq, 60)
+    assert seq.mode in (GaitMode.WALK, GaitMode.TO_STAND) and seq.walking
+
+
+def test_blend_walk_style_needs_the_walking_policy_during_the_crouch():
+    seq = make_seq(crouch_style="blend_walk")
+    seq.request_walk()
+    assert seq.walking
+    with pytest.raises(GaitError, match="needs a walk target"):
+        seq.step(STAND_TARGET, None)
+
+
+def test_unknown_styles_are_refused():
+    with pytest.raises(GaitError, match="crouch_style"):
+        make_seq(crouch_style="hope")
+    with pytest.raises(GaitError, match="recover_style"):
+        make_seq(recover_style="pray")
+
+
+def test_phase_features_are_the_unit_circle():
+    seq = make_seq()
+    assert np.allclose(seq.phase_features(), [0.0, 1.0])
+    seq.phase = 0.25
+    assert np.allclose(seq.phase_features(), [1.0, 0.0], atol=1e-12)
+
+
+# =====================================================================
+# Observation layout: one builder feeds both policies
+# =====================================================================
+
+from humanoid_deploy.policy import ObservationLayout  # noqa: E402
+
+
+def test_the_walking_layout_is_a_superset_of_the_standing_one():
+    stand = ObservationLayout(13)
+    walk = ObservationLayout(13, extra=5)
+    assert stand.size == 48 and walk.size == 53
+    assert walk.stand_size == stand.size
+    for name in ("accel", "gyro", "gravity", "qpos", "qvel", "action"):
+        assert getattr(stand, name) == getattr(walk, name)
+    assert walk.tail == slice(48, 53)
+
+
+def test_the_gait_tail_is_labelled_so_an_ood_report_names_it():
+    walk = ObservationLayout(13, extra=5)
+    assert walk.label(48) == "phase_sin"
+    assert walk.label(52) == "cmd_wz"

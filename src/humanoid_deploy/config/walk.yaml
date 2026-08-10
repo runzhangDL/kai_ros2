@@ -1,0 +1,100 @@
+# =============================================================================
+# Deployment configuration for the WALKING policy.
+#
+# Loaded on top of deploy.yaml, not instead of it: walk.launch.py passes both,
+# so every executor and safety setting here is the one the standing policy was
+# validated with, and only the differences appear below.
+#
+# READ tools/sim_handover.py's output before raising walk_duration_s or
+# clearing crouch_only. As of the camp_E1 checkpoint the walking policy has a
+# measured failure pocket at +1.5 to +2.0 deg of initial pitch, and the crouch
+# settles at +1.53 deg. crouch_only defaults to TRUE for that reason.
+# =============================================================================
+
+/humanoid_servo:
+  ros__parameters:
+    # Walking swings the legs much harder than standing does, and the tracking
+    # guard was tuned against a policy that holds still. In MuJoCo the walking
+    # policy's command leads the measured angle by the full 2-cycle actuator
+    # delay on every swing, which at ~120 deg/s is ~10 deg of standing error --
+    # under the 15 deg limit, but not by much once hardware adds its own lag.
+    stall_error_deg: 25.0
+    stall_persist_s: 1.5
+    # The knees travel 19.7..65.5 deg while walking, against 2000 counts/s
+    # (176 deg/s). That is adequate but it is the servo, not the policy, that
+    # sets the pace; the gait was trained against 1.35-4.5 rad/s per joint.
+    servo_goal_speed: 3000
+
+/humanoid_policy:
+  ros__parameters:
+    # ---- what to run -------------------------------------------------------
+    bundle: ""          # standing policy, set by the launch file
+    walk_bundle: ""     # walking policy, set by the launch file
+
+    # ---- START HERE --------------------------------------------------------
+    # true: the whole sequence runs -- crouch, hold, hand back, Ctrl-C -- with
+    # the walking policy evaluated and published but given ZERO authority. The
+    # robot squats and stands up again. This exercises every part of the
+    # deployment except the gait itself, which is the part that is not yet
+    # trustworthy. Clear it only after a retrained checkpoint passes
+    # tools/sim_handover.py --sweep robustness.
+    crouch_only: true
+
+    # ---- sequencing --------------------------------------------------------
+    # Standing pose -> crouch. Measured in sim: 1, 2 and 4 s all settle to the
+    # same 1.5 deg lean, so this is not a speed the outcome is sensitive to.
+    # 2 s keeps the knees under 25 deg/s, well inside what the servos deliver.
+    crouch_s: 2.0
+    # Hold the crouch before handing over. Long enough that joint velocities
+    # are back to zero -- the walking policy's validated start is a robot at
+    # rest, and qvel is a third of what it reads.
+    settle_s: 0.75
+    walk_duration_s: 5.0
+    recover_s: 2.0
+
+    # ramp | blend_stand | blend_walk. 'ramp' interpolates open-loop from the
+    # commanded standing pose into the crouch. It sounds like the least safe of
+    # the three and it measures as the best: 'blend_stand' keeps the standing
+    # policy live all the way down, and it falls over, because that policy
+    # saturates fighting a descent it has no way to understand and averaging a
+    # saturated controller with a pose target tracks neither. The crouch is a
+    # statically stable, symmetric squat -- it does not need a balance
+    # controller to reach, it needs to be reached slowly.
+    crouch_style: ramp
+    # blend | freeze. 'blend' keeps both policies live so the walking policy
+    # finishes its stride instead of parking a swing foot in the air.
+    recover_style: blend
+
+    # ---- the velocity command ---------------------------------------------
+    # obs[50:53]. The trained range is [0.05, 0.12] m/s: cmd_vx = 0 was NEVER
+    # trained (zero_cmd_prob defaulted to 0 and the campaign did not raise it),
+    # so zero is not a stop command and the node refuses it. Stopping is what
+    # the TO_STAND blend is for. Note the checkpoint does not track this
+    # command anyway -- it walks at ~0.036 m/s whatever it is told.
+    cmd_vx: 0.085
+    cmd_wz: 0.0
+
+    # ---- stopping ----------------------------------------------------------
+    # Which gait phase to prefer stopping on; <0 disables the preference. Left
+    # off because it buys nothing measurable here: the feet agree with the
+    # clock only 56.5% of the time against a 50% chance baseline, so the phase
+    # barely predicts which foot is down.
+    stop_phase: -1.0
+    max_stop_wait_s: 1.5
+
+    # ---- safety ------------------------------------------------------------
+    # Abandon the walk and hand back to the standing policy above this tilt.
+    # Well below servo_node's 40 deg FALL threshold on purpose: that one cuts
+    # torque, which is right for a fall and wrong for a wobble. Standing
+    # recovered from 17.8 deg excursions on this robot, so 22 leaves the
+    # recovery it is known to manage and still acts early.
+    walk_abort_tilt_deg: 22.0
+    arm_tilt_deg: 12.0
+
+    # ---- observation -------------------------------------------------------
+    imu_topic: /imu/data
+    accel_units: auto
+    gyro_units: rad/s
+    gravity_source: complementary
+    complementary_tau: 1.0
+    warn_ood_sigma: 8.0

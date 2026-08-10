@@ -157,10 +157,12 @@ class JointMap:
         :param calibrations: ``{name: JointCalibration}`` from the calibration store.
         :param xml_lower/upper: per-joint limits the policy was trained against.
         :param action_scale: the env's action scale, in radians.
-        :param limit_margin_rad: shrink the safe envelope by this much per side,
-            except where that would exclude the nominal pose (see below).
-        :param default_pose: the policy's target pose, 0 rad per joint for this
-            env. Defaults to zeros.
+        :param limit_margin_rad: shrink the *calibrated* travel by this much per
+            side, except where that would exclude the nominal pose (see below).
+            It is not applied to the model's limits -- see the comment there.
+        :param default_pose: the pose the policy's action is a residual about:
+            0 rad for the standing policy, a crouch for the walking one.
+            Defaults to zeros.
         :param nominal_tolerance_rad: how far the measured range may miss the
             nominal pose before that counts as a real zero disagreement rather
             than sweep imprecision.
@@ -213,6 +215,8 @@ class JointMap:
         # of the two on each side can only ever reduce travel, never invent it.
         hard_lower = np.maximum(calib_lower, self.xml_lower)
         hard_upper = np.minimum(calib_upper, self.xml_upper)
+        self.reach_lower = hard_lower.copy()
+        self.reach_upper = hard_upper.copy()
 
         # A joint may end up a hair "outside" its own measured range, because the
         # two numbers come from different measurements of different quality. The
@@ -255,19 +259,33 @@ class JointMap:
         hard_lower = np.minimum(hard_lower, self.default_pose)
         hard_upper = np.maximum(hard_upper, self.default_pose)
 
+        # The margin exists to keep the servo off a *physical* hard stop, and
+        # the only side that knows where one is is the calibration -- those
+        # numbers came from sweeping the real joint until it stopped. The XML
+        # limit is a modelling choice that this code already honours exactly,
+        # so shrinking inside it protects nothing and costs the policy
+        # authority on precisely the joints that need it: this robot's walking
+        # pose puts right_ankle_pitch *at* its model limit, and a margin taken
+        # off that bound would clamp away 2 deg the policy uses on every step.
+        #
+        # So: margin off the calibrated bound, then intersect with the model
+        # bound. Where the model is the tighter of the two, no margin applies.
+        margined_lower = np.maximum(hard_lower, calib_lower + limit_margin_rad)
+        margined_upper = np.minimum(hard_upper, calib_upper - limit_margin_rad)
+
         # The margin must never exclude the nominal pose. A joint whose standing
         # position is legitimately *at* an endpoint -- a knee that cannot
         # hyper-extend has its straight pose at the limit -- would otherwise end
         # up with an envelope the robot can never be inside, and it could never
         # arm.
-        self.safe_lower = np.minimum(hard_lower + limit_margin_rad, self.default_pose)
-        self.safe_upper = np.maximum(hard_upper - limit_margin_rad, self.default_pose)
+        self.safe_lower = np.minimum(margined_lower, self.default_pose)
+        self.safe_upper = np.maximum(margined_upper, self.default_pose)
         #: Joints where the nominal pose sits on (or within the margin of) a
         #: hard limit, so the margin buys no protection on that side.
         #: Informational, not an error -- but worth logging, because those
         #: joints have zero cushion between the standing pose and a hard stop.
-        pinched_low = hard_lower + limit_margin_rad > self.default_pose + 1e-9
-        pinched_high = hard_upper - limit_margin_rad < self.default_pose - 1e-9
+        pinched_low = margined_lower > self.default_pose + 1e-9
+        pinched_high = margined_upper < self.default_pose - 1e-9
         self.unmargined = [
             self.names[i] for i in np.nonzero(pinched_low | pinched_high)[0]
         ]
@@ -318,12 +336,16 @@ class JointMap:
     def command_window(self) -> tuple[np.ndarray, np.ndarray]:
         """Widest targets the policy can produce, after clamping.
 
-        The env computes ``clip(0 + action*action_scale, limits)`` with the
-        action bounded to [-1, 1] by tanh, so the reachable set is at most
-        +/- action_scale, further reduced by the safe envelope.
+        The env computes ``clip(default_pose + action*action_scale, limits)``
+        with the action bounded to [-1, 1] by tanh, so the reachable set is at
+        most ``default_pose +/- action_scale``, further reduced by the safe
+        envelope. The standing policy's default pose is 0 rad, but the walking
+        policy's is a crouch, and centring this window on zero for that one
+        would understate every leg joint's reach by up to 42 deg -- which is
+        exactly the error the seam check exists to catch.
         """
-        lo = np.maximum(-self.action_scale, self.safe_lower)
-        hi = np.minimum(self.action_scale, self.safe_upper)
+        lo = np.maximum(self.default_pose - self.action_scale, self.safe_lower)
+        hi = np.minimum(self.default_pose + self.action_scale, self.safe_upper)
         return lo, hi
 
     def seam_violations(self, margin_counts: float = 16.0) -> list[SeamViolation]:

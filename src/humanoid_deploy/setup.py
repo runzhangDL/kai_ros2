@@ -33,6 +33,10 @@ setup(
         "console_scripts": [
             "policy_node = humanoid_deploy.policy_node:main",
             "servo_node = humanoid_deploy.servo_node:main",
+            # Walking runs the executor and both policies in ONE process, so
+            # that a Ctrl-C can hand the robot back to the standing policy
+            # instead of killing whatever is holding it up.
+            "walk_node = humanoid_deploy.walk_node:main",
             "bus_benchmark = humanoid_deploy.bus_benchmark:main",
         ],
     },

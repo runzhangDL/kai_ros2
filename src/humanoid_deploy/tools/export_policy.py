@@ -7,6 +7,16 @@ Jetson.
     python3 export_policy.py --params stand_params.pkl --xml robot/robot.xml \
                              --out policy_bundle.npz
 
+    python3 export_policy.py --params walkfree_deploy.pkl --xml robot/robot.xml \
+                             --sidecar walkfree_deploy.pkl.json \
+                             --out walk_bundle.npz
+
+The walking policy needs four things the standing one does not: a 53-entry
+observation instead of 48, a residual about a crouched nominal pose instead of
+about 0 rad, a gait clock, and a velocity command. All four are read from the
+trainer's ``.pkl.json`` sidecar rather than retyped, and the sidecar's actuator
+order is checked against the XML before any of it is believed.
+
 Why the bundle carries more than weights
 ----------------------------------------
 The deployment has to agree with training on things that live in the MuJoCo
@@ -91,6 +101,81 @@ def resolve_frame_skip(timestep, control_rate_hz, override=None):
               f"{timestep}s timestep; the env used {actual:.2f} Hz "
               f"(frame_skip={frame_skip}) and so does this bundle")
     return frame_skip, actual
+
+
+#: Sidecar keys copied verbatim into the bundle's ``gait`` block. Each is
+#: something the deployment node must agree with training on exactly, and none
+#: of them can be derived from the XML or the checkpoint.
+GAIT_KEYS = (
+    "gait_period_s", "phase_increment_per_cycle", "duty_factor",
+    "swing_height_m", "cmd_vx_range", "cmd_wz_range", "delay_cycles",
+    "joint_vel_quant", "obs_layout", "control_law",
+)
+
+
+def read_sidecar(path):
+    """Load a ``train_walk_free.py`` sidecar and correct its known defect.
+
+    The trainer writes ``cmd_vx_range`` as ``[0.0, args.cmd_vx_max]``, dropping
+    ``args.cmd_vx_min`` -- so every sidecar claims a zero forward command was
+    trained. It was not: ``zero_cmd_prob`` defaults to 0 and the campaign that
+    produced this checkpoint did not raise it, so the lowest velocity the
+    policy has ever seen is the env default of 0.05 m/s. Commanding 0 would put
+    the one input that governs whether it walks at all outside its training
+    range, which is the opposite of a safe way to stop.
+
+    Rather than propagate that, the lower bound is recovered from the env's own
+    default and the bundle records the corrected range. ``--cmd-vx-min``
+    overrides it if a future run really does train zero commands.
+
+    Sidecars written after the trainer was fixed carry ``zero_cmd_prob``, and
+    their ``cmd_vx_range`` can be believed as written. That key is the marker
+    ``trained_command_floor`` keys off.
+    """
+    with open(path, "r", encoding="utf-8") as handle:
+        sidecar = json.load(handle)
+    if "nominal_pose_rad" not in sidecar:
+        raise SystemExit(
+            f"{path} has no 'nominal_pose_rad'. Sidecars written before that "
+            "field was added can still be exported: pass --nominal-from with a "
+            "newer sidecar from the same env, and the two will be cross-checked."
+        )
+    return sidecar
+
+
+def borrow_nominal_pose(sidecar, reference_path):
+    """Fill in a pre-``nominal_pose_rad`` sidecar from a newer one.
+
+    ``NOMINAL_POSE_DEG`` is a module constant in ``mjx_walk_free_env``, so every
+    checkpoint from that env shares one crouch. That makes borrowing it sound --
+    but only if the two runs really are the same env, so everything that would
+    reveal a difference is compared first. Getting this wrong would apply a
+    40 deg knee offset from one robot to another, silently.
+    """
+    with open(reference_path, "r", encoding="utf-8") as handle:
+        reference = json.load(handle)
+    if "nominal_pose_rad" not in reference:
+        raise SystemExit(f"{reference_path} has no nominal pose to lend")
+    for key in ("env", "actuator_order", "action_scale", "control_rate_hz",
+                "phase_increment_per_cycle", "obs_size", "frame_skip"):
+        if key in sidecar and key in reference and sidecar[key] != reference[key]:
+            raise SystemExit(
+                f"refusing to borrow a nominal pose across a {key} change:\n"
+                f"  target    {sidecar[key]!r}\n  reference {reference[key]!r}")
+    for key in ("nominal_pose_rad", "nominal_pose_deg", "nominal_base_height_m"):
+        if key in reference:
+            sidecar[key] = reference[key]
+    return sidecar
+
+
+def trained_command_floor(sidecar, override):
+    """Lowest forward command this policy has actually seen, in m/s."""
+    if override is not None:
+        return float(override)
+    if "zero_cmd_prob" in sidecar:
+        floor = float(sidecar["cmd_vx_range"][0])
+        return 0.0 if float(sidecar["zero_cmd_prob"]) > 0.0 else floor
+    return 0.05     # the env default, for sidecars from before the fix
 
 
 def model_metadata(xml_path, control_rate_hz, frame_skip_override, action_scale):
@@ -215,9 +300,35 @@ def main() -> int:
     parser.add_argument("--frame-skip", type=int, default=None,
                         help="explicit override, only if you passed frame_skip "
                              "to the env directly instead of a rate")
+    parser.add_argument("--sidecar", default=None,
+                        help="a walk checkpoint's .pkl.json. Supplying it "
+                             "switches to the walking policy: the nominal "
+                             "pose, action scale, control rate, gait clock and "
+                             "command ranges all come from it instead of from "
+                             "the flags above")
+    parser.add_argument("--cmd-vx-min", type=float, default=None,
+                        help="lowest forward command the policy was trained "
+                             "on. Only needed for sidecars written before the "
+                             "trainer's cmd_vx_range bug was fixed (see "
+                             "read_sidecar)")
+    parser.add_argument("--nominal-from", default=None,
+                        help="a newer sidecar to take the crouched nominal "
+                             "pose from, for checkpoints written before that "
+                             "field existed. Cross-checked before use.")
     parser.add_argument("--tolerance", type=float, default=2e-5)
     parser.add_argument("--skip-verify", action="store_true")
     args = parser.parse_args()
+
+    sidecar = None
+    if args.sidecar:
+        if args.nominal_from:
+            with open(args.sidecar, "r", encoding="utf-8") as handle:
+                sidecar = borrow_nominal_pose(json.load(handle), args.nominal_from)
+        else:
+            sidecar = read_sidecar(args.sidecar)
+    if sidecar is not None:
+        args.action_scale = float(sidecar["action_scale"])
+        args.control_rate_hz = float(sidecar["control_rate_hz"])
 
     from brax.io import model
 
@@ -236,16 +347,56 @@ def main() -> int:
                           args.action_scale)
     if meta["nu"] != act_size:
         raise SystemExit(f"XML has {meta['nu']} actuators but policy emits {act_size}")
-    expected_obs = 9 + (meta["nq"] - 7) + (meta["nv"] - 6) + meta["nu"]
+
+    if sidecar is not None:
+        # The sidecar's actuator order and the XML's must agree, or the nominal
+        # pose gets applied to the wrong joints -- a 40 deg error on a knee,
+        # silently. Check before using a single number from it.
+        if list(sidecar["actuator_order"]) != meta["joint_names"]:
+            raise SystemExit(
+                "the sidecar's actuator_order does not match this XML:\n"
+                f"  sidecar : {list(sidecar['actuator_order'])}\n"
+                f"  xml     : {meta['joint_names']}"
+            )
+        nominal = [float(v) for v in sidecar["nominal_pose_rad"]]
+        outside = [
+            f"{name} {np.degrees(q):+.1f} deg vs [{np.degrees(lo):+.1f}, "
+            f"{np.degrees(hi):+.1f}]"
+            for name, q, lo, hi in zip(meta["joint_names"], nominal,
+                                       meta["xml_lower_rad"], meta["xml_upper_rad"])
+            if q < lo - 1e-9 or q > hi + 1e-9
+        ]
+        if outside:
+            raise SystemExit(
+                "the sidecar's nominal pose is outside the XML joint limits, so "
+                "the robot could never hold it: " + "; ".join(outside))
+        meta["default_pose_rad"] = nominal
+        meta["obs_extra"] = int(sidecar["obs_size"]) - (9 + 3 * meta["nu"])
+        gait = {key: sidecar[key] for key in GAIT_KEYS if key in sidecar}
+        gait["cmd_vx_range"] = [trained_command_floor(sidecar, args.cmd_vx_min),
+                                float(sidecar["cmd_vx_range"][1])]
+        gait["cmd_vy_range"] = [0.0, 0.0]   # never trained non-zero
+        meta["gait"] = gait
+
+    expected_obs = (9 + (meta["nq"] - 7) + (meta["nv"] - 6) + meta["nu"]
+                    + meta.get("obs_extra", 0))
     if expected_obs != obs_size:
         raise SystemExit(
-            f"XML implies obs size {expected_obs} but the policy takes {obs_size}"
+            f"XML plus a {meta.get('obs_extra', 0)}-entry tail implies obs size "
+            f"{expected_obs} but the policy takes {obs_size}"
         )
     print(f"model : {meta['nu']} joints, control dt={meta['control_dt']:.4f}s "
           f"({meta['control_rate_hz']:.1f} Hz, frame_skip={meta['frame_skip']}, "
           f"physics {meta['physics_timestep']}s), action_scale={meta['action_scale']}")
-    for name, lo, hi in zip(meta["joint_names"], meta["xml_lower_rad"], meta["xml_upper_rad"]):
-        print(f"        {name:<20} [{np.degrees(lo):+7.1f}, {np.degrees(hi):+7.1f}] deg")
+    for name, lo, hi, q in zip(meta["joint_names"], meta["xml_lower_rad"],
+                               meta["xml_upper_rad"], meta["default_pose_rad"]):
+        window = (max(q - meta["action_scale"], lo), min(q + meta["action_scale"], hi))
+        print(f"        {name:<24} limits [{np.degrees(lo):+7.1f},"
+              f"{np.degrees(hi):+7.1f}]  nominal {np.degrees(q):+7.1f}"
+              f"  window [{np.degrees(window[0]):+7.1f},"
+              f"{np.degrees(window[1]):+7.1f}] deg")
+    if meta.get("gait"):
+        print(f"gait  : {json.dumps(meta['gait'], sort_keys=True)}")
 
     if not args.skip_verify:
         err, ref, ours = verify_against_brax(params, mean, std, layers, obs_size, act_size)

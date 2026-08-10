@@ -30,16 +30,28 @@ def swish(x: np.ndarray) -> np.ndarray:
     return x / (1.0 + np.exp(-x))
 
 
+#: Labels for the walking policy's five extra observation entries, in order.
+#: ``mjx_walk_free_env`` appends the gait clock and the velocity command after
+#: the 48 entries it shares with the standing policy.
+GAIT_TAIL_LABELS = ("phase_sin", "phase_cos", "cmd_vx", "cmd_vy", "cmd_wz")
+
+
 @dataclass(frozen=True)
 class ObservationLayout:
-    """Where each quantity lives in the 48-vector, derived from nu.
+    """Where each quantity lives in the observation, derived from nu.
 
     Mirrors ``mjx_stand_env._get_obs``:
         accel(3) gyro(3) gravity(3) qpos(nu) qvel(nu) last_action(nu)
-    ``last_action`` is last by contract -- do not reorder.
+
+    ``mjx_walk_free_env`` is a strict superset: the first ``9 + 3*nu`` entries
+    are byte-identical, and ``extra`` more follow (the gait clock and the
+    velocity command). Keeping one layout for both is what lets the same
+    observation builder feed either policy, and it is why ``last_action`` must
+    stay at index ``9 + 2*nu`` -- do not reorder.
     """
 
     nu: int
+    extra: int = 0
 
     @property
     def accel(self) -> slice:
@@ -66,15 +78,27 @@ class ObservationLayout:
         return slice(9 + 2 * self.nu, 9 + 3 * self.nu)
 
     @property
-    def size(self) -> int:
+    def tail(self) -> slice:
+        """The gait clock and velocity command; empty for the stand policy."""
+        return slice(9 + 3 * self.nu, 9 + 3 * self.nu + self.extra)
+
+    @property
+    def stand_size(self) -> int:
+        """Length of the prefix the two policies share."""
         return 9 + 3 * self.nu
+
+    @property
+    def size(self) -> int:
+        return 9 + 3 * self.nu + self.extra
 
     def label(self, index: int) -> str:
         names = (["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
                   "grav_x", "grav_y", "grav_z"]
                  + [f"qpos_{i}" for i in range(self.nu)]
                  + [f"qvel_{i}" for i in range(self.nu)]
-                 + [f"act_{i}" for i in range(self.nu)])
+                 + [f"act_{i}" for i in range(self.nu)]
+                 + list(GAIT_TAIL_LABELS[: self.extra])
+                 + [f"tail_{i}" for i in range(len(GAIT_TAIL_LABELS), self.extra)])
         return names[index] if 0 <= index < len(names) else f"obs_{index}"
 
 
@@ -107,11 +131,17 @@ class Policy:
 
         self.obs_size = int(self.layers[0][0].shape[0])
         self.nu = int(self.layers[-1][0].shape[1] // 2)
-        self.layout = ObservationLayout(self.nu)
+        # The bundle states its own tail length rather than letting this code
+        # infer one from the observation size: an inferred tail would silently
+        # absorb a genuine mismatch (a 53-input network fed by a 48-entry
+        # builder) into "oh, five extra entries" instead of failing.
+        extra = int(self.meta.get("obs_extra", 0))
+        self.layout = ObservationLayout(self.nu, extra)
         if self.layout.size != self.obs_size:
             raise PolicyError(
                 f"bundle obs size {self.obs_size} does not match the "
-                f"9 + 3*{self.nu} = {self.layout.size} layout this code assumes"
+                f"9 + 3*{self.nu} + {extra} = {self.layout.size} layout the "
+                "bundle's metadata declares"
             )
         if self.mean.shape != (self.obs_size,) or self.std.shape != (self.obs_size,):
             raise PolicyError("normalizer shape does not match the network input")
@@ -122,9 +152,19 @@ class Policy:
         self.xml_lower = np.asarray(self.meta["xml_lower_rad"], dtype=np.float64)
         self.xml_upper = np.asarray(self.meta["xml_upper_rad"], dtype=np.float64)
         self.default_pose = np.asarray(self.meta["default_pose_rad"], dtype=np.float64)
+        #: Gait metadata, present only for the walking bundle. Everything the
+        #: node needs to advance the clock and pick a legal command lives here,
+        #: extracted from the training sidecar at export time so no number is
+        #: ever re-typed into a YAML file.
+        self.gait: dict = dict(self.meta.get("gait") or {})
 
         if len(self.joint_names) != self.nu:
             raise PolicyError("bundle joint_names length does not match action size")
+        if self.default_pose.shape != (self.nu,):
+            raise PolicyError(
+                f"bundle default_pose_rad has {self.default_pose.size} entries "
+                f"but the policy drives {self.nu} joints"
+            )
 
     # -- inference ---------------------------------------------------------
 
@@ -183,9 +223,22 @@ class Policy:
         ]
 
     def describe(self) -> str:
-        return (
+        lines = [
             f"policy: obs={self.obs_size} nu={self.nu} "
             f"action_scale={self.action_scale} "
-            f"trained at {1.0 / self.control_dt:.1f} Hz\n"
-            f"  joints (MuJoCo order): {', '.join(self.joint_names)}"
-        )
+            f"trained at {1.0 / self.control_dt:.1f} Hz",
+            f"  joints (MuJoCo order): {', '.join(self.joint_names)}",
+        ]
+        if np.any(np.abs(self.default_pose) > 1e-9):
+            lines.append(
+                "  residual about a non-zero nominal pose (deg): "
+                + " ".join(f"{np.degrees(v):+.1f}" for v in self.default_pose)
+            )
+        if self.gait:
+            lines.append(
+                f"  gait: period {self.gait.get('gait_period_s')}s "
+                f"duty {self.gait.get('duty_factor')} "
+                f"phase step {self.gait.get('phase_increment_per_cycle'):.6f} "
+                f"cmd_vx {self.gait.get('cmd_vx_range')}"
+            )
+        return "\n".join(lines)
