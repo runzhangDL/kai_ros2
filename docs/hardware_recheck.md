@@ -146,9 +146,10 @@ This is the number that decides the control rate.
 ros2 run humanoid_deploy bus_benchmark --baud 500000 \
   2>&1 | tee ~/hwcheck/04_bench_500k.txt
 
-# and the old rate, for a controlled comparison on the same cabling
-ros2 run humanoid_deploy bus_benchmark --baud 250000 \
-  2>&1 | tee ~/hwcheck/04_bench_250k.txt
+# NOT a valid comparison -- do not bother. The servos' EEPROM baud is now
+# 500000, so nothing answers at 250000 and the benchmark measures its own
+# timeouts (it reported 0% reads and a 144 ms "cycle"). Comparing rates means
+# re-bauding all 13 servos back down first.
 ```
 
 **Prediction, so the result can be checked rather than just accepted:** one
@@ -165,9 +166,16 @@ baud rate therefore buys about 4.5 ms, not half:
 | headroom at 40 Hz (25 ms) | +5.5 ms — workable |
 | headroom at 50 Hz (20 ms) | +0.5 ms — no |
 
-If the measurement lands near 19–20 ms the model is right and **33 Hz is the
-sensible new target**. If it lands near 12 ms, something else was dominating
-and 40–50 Hz opens up.
+**MEASURED: 24.00 ms p50, 27.93 ms p99, ceiling 35.8 Hz — identical to
+250000 baud.** The prediction above is wrong and the model behind it is wrong:
+airtime was never what the cycle was paying for. The proof is the write half,
+which costs 11.87 ms while putting 47 bytes (0.94 ms) on the wire and expecting
+no replies at all. Roughly 11 ms per transaction is fixed overhead somewhere
+below this code — serial driver, `tcflush`/`tcdrain`, or the Tegra HS-UART's
+DMA timeout. `tools/bus_probe.py` takes the transaction apart to find out.
+
+Consequence: **the control rate does not change. Stay at 25 Hz**, and no
+retrain is needed on account of the rate.
 
 ---
 
@@ -181,7 +189,7 @@ walking policy is most sensitive to and the one a step fit determines worst.
 
 ```bash
 for ID in 3 6 11; do
-  python3 -u tools/servo_step.py  --id $ID --amplitude 20 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_step.py  --id $ID --amplitude 20 --acc 100 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
   python3 -u tools/servo_trace.py --id $ID --amplitude 20 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
@@ -189,12 +197,12 @@ done
 # the roll joints, which have NEVER been measured and still carry a guessed
 # (1.35 rad/s, 11.0 rad/s^2). Smaller amplitude: the ankle rolls only span +-20 deg.
 for ID in 5 9; do
-  python3 -u tools/servo_step.py  --id $ID --amplitude 15 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_step.py  --id $ID --amplitude 15 --acc 100 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
   python3 -u tools/servo_trace.py --id $ID --amplitude 15 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
 for ID in 2 12; do
-  python3 -u tools/servo_step.py  --id $ID --amplitude 10 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_step.py  --id $ID --amplitude 10 --acc 100 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
   python3 -u tools/servo_trace.py --id $ID --amplitude 10 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
@@ -218,7 +226,7 @@ standing and stable, then measure the load-bearing joints one at a time:
 
 ```bash
 for ID in 3 5 9 11; do
-  python3 -u tools/servo_step.py  --id $ID --amplitude 12 2>&1 | tee ~/hwcheck/05b_step_$ID.txt
+  python3 -u tools/servo_step.py  --id $ID --amplitude 12 --acc 100 2>&1 | tee ~/hwcheck/05b_step_$ID.txt
   python3 -u tools/servo_trace.py --id $ID --amplitude 12 --save ~/hwcheck/05b_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05b_trace_$ID.txt
   python3 -u tools/motor_check.py --hold      # re-stiffen; the step tool releases its joint

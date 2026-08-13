@@ -137,7 +137,12 @@ def main():
                         help="step size in degrees (default 15)")
     parser.add_argument("--speed", type=int, default=3000,
                         help="Goal_Speed in counts/s (0 = unlimited)")
-    parser.add_argument("--acc", type=int, default=30)
+    # MUST match deploy.yaml's servo_acc, which is 100. The old default of 30
+    # is 3000 counts/s^2 = 4.6 rad/s^2, and that is BELOW what every joint on
+    # this robot can produce -- so a step run at 30 measures the register, not
+    # the motor, and reports an acceleration limit roughly 4x too low. It
+    # silently invalidated a whole characterisation round.
+    parser.add_argument("--acc", type=int, default=100)
     parser.add_argument("--settle", type=float, default=1.5,
                         help="seconds to record after the step")
     parser.add_argument("--no-load-speed", type=float, default=280.0,
