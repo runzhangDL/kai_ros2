@@ -144,16 +144,48 @@ def main():
                 first = p50
             print(f"   {count:>7}{p50:>10.2f}{p99:>10.2f}{air:>13.2f}"
                   f"{p50 - air:>13.2f}")
-        p50_all, _ = stats(timed(lambda: bus.read_positions(ids), 40))
-        per_servo = (p50_all - first) / (len(ids) - 1)
-        print(f"\n   1 servo {first:.2f} ms -> {len(ids)} servos {p50_all:.2f} ms")
-        print(f"   marginal cost per extra servo: {per_servo:.2f} ms")
-        if per_servo < 0.15:
-            print("   -> FIXED per-transaction latency dominates. This is the "
-                  "serial\n      driver, not the servos, and it is worth chasing.")
-        else:
-            print("   -> per-servo turnaround dominates. This is the servos' own\n"
-                  "      firmware; software cannot remove it.")
+        # Do NOT fit a straight line through this: the cost is flat at about
+        # 0.2 ms/servo up to 8 servos and then jumps ~8.7 ms between 8 and 13,
+        # which a linear fit launders into a fake "0.85 ms per servo". The jump
+        # is where the request packet crosses 16 bytes -- a TX FIFO boundary --
+        # and section 4 confirms it is tcdrain, not the servos.
+        print("\n   Read the deltas, not a slope: a cliff between two sizes is a")
+        print("   buffer boundary, and averaging across it invents a per-servo")
+        print("   cost that is not there.")
+
+        # ---- 4. is tcdrain the cost, and where is the cliff? ----------
+        print("\n4. tcdrain (flush) vs transmit size -- the suspected cause")
+        print(f"   {'bytes':>7}{'write ms':>11}{'flush ms':>11}"
+              f"{'airtime ms':>13}")
+        for nbytes in (8, 12, 16, 17, 20, 21, 24, 32, 47):
+            blob = bytes([0xFF, 0xFF]) + bytes(nbytes - 2)
+            def one(b=blob):
+                bus._port.reset_input_buffer()
+                t = time.perf_counter()
+                bus._port.write(b)
+                mid = time.perf_counter()
+                bus._port.flush()
+                return mid - t, time.perf_counter() - mid
+            samples = [one() for _ in range(60)]
+            w = statistics.median(s[0] for s in samples) * 1e3
+            f = statistics.median(s[1] for s in samples) * 1e3
+            print(f"   {nbytes:>7}{w:>11.2f}{f:>11.2f}{nbytes * byte_us / 1e3:>13.2f}")
+        bus._port.reset_input_buffer()
+        print("   A step here is a FIFO boundary. Everything to its right pays a")
+        print("   fixed cost that has nothing to do with how much data there is.")
+
+        # ---- 5. does dropping flush actually work? --------------------
+        print("\n5. sync read of 13 servos, with and without tcdrain")
+        for label, flush in (("with flush", True), ("without flush", False)):
+            bus._flush_tx = flush
+            samples = timed(lambda: bus.read_positions(ids), args.cycles)
+            got = [len(bus.read_positions(ids)) == len(ids) for _ in range(60)]
+            p50, p99 = stats(samples)
+            print(f"   {label:<15} p50 {p50:6.2f} ms  p99 {p99:6.2f} ms   "
+                  f"complete {sum(got)}/60")
+        bus._flush_tx = True
+        print("   Equal completion rates and a large time drop means the flush is")
+        print("   pure overhead here -- the echo we wait for is the real barrier.")
 
         # ---- 3. the write half ----------------------------------------
         print("\n3. one sync write of 13 goal positions (no replies expected)")

@@ -44,16 +44,23 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout-ms", type=int, default=30)
     parser.add_argument("--no-write", action="store_true",
                         help="measure reads only")
+    parser.add_argument("--no-flush", action="store_true",
+                        help="skip tcdrain after each transmit. On this Tegra "
+                             "UART tcdrain costs ~11.8 ms for any packet over "
+                             "16 bytes, which is nearly the whole cycle; the "
+                             "echo we already wait for is a stricter barrier.")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     ids = [int(x) for x in args.ids.split(",")]
     try:
-        bus = ServoBus(args.port, args.baud, timeout_ms=args.timeout_ms)
+        bus = ServoBus(args.port, args.baud, timeout_ms=args.timeout_ms,
+                       flush_tx=not args.no_flush)
     except ServoBusError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"{args.port} @ {args.baud}, {len(ids)} servos, {args.cycles} cycles")
+    print(f"{args.port} @ {args.baud}, {len(ids)} servos, {args.cycles} cycles"
+          + ("  [tcdrain SKIPPED]" if args.no_flush else ""))
     print("read = sync read of present position; write = sync write of goal position")
     print("(the write commands each servo to where it already is -- nothing moves)\n")
 

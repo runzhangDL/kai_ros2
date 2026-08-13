@@ -141,14 +141,28 @@ def parse_sync_read(buf: bytes, ids, count: int, sent: bytes = b"") -> dict[int,
 class ServoBus:
     """Half-duplex Feetech bus with sync read and sync write."""
 
+    #: Class-level default so instances built with ``__new__`` -- the test
+    #: harness does exactly that, to attach a fake port without opening a real
+    #: one -- still have a defined transmit policy. ``__init__`` overrides it.
+    _flush_tx = True
+
     def __init__(self, port: str, baudrate: int, timeout_ms: int = 30,
-                 retries: int = 1) -> None:
+                 retries: int = 1, flush_tx: bool = True) -> None:
         if serial is None:
             raise ServoBusError("pyserial is not installed (pip3 install pyserial)")
         self.port_name = port
         self.baudrate = int(baudrate)
         self._reply_timeout = timeout_ms / 1000.0
         self._retries = max(0, int(retries))
+        # tcdrain() on this Tegra HS-UART costs ~11.8 ms for any packet over
+        # 16 bytes and ~0 below it -- a TX FIFO boundary, not airtime. The
+        # 13-servo sync read request is 21 bytes, so it pays that on every
+        # cycle, and it is essentially the entire 24 ms control cycle. Nothing
+        # here needs it: the half-duplex circuit echoes our transmit back, and
+        # waiting for that echo is a stricter barrier than waiting for the
+        # kernel to say it sent it. Kept switchable only so the change can be
+        # A/B'd against a bus that has been working.
+        self._flush_tx = bool(flush_tx)
         try:
             self._port = self._open(port, baudrate)
         except Exception as exc:  # noqa: BLE001
@@ -253,7 +267,8 @@ class ServoBus:
             try:
                 self._port.reset_input_buffer()
                 self._port.write(packet)
-                self._port.flush()
+                if self._flush_tx:
+                    self._port.flush()
                 echo = self._drain_echo(len(packet))
                 complete = self._collect_until(parse, echo, window)
             except Exception:  # noqa: BLE001 - a flaky bus must not kill the loop
@@ -274,7 +289,8 @@ class ServoBus:
         try:
             self._port.reset_input_buffer()
             self._port.write(packet)
-            self._port.flush()
+            if self._flush_tx:
+                self._port.flush()
             echo = self._drain_echo(len(packet))
             return self._collect_until(
                 lambda buf: parse_status_frame(buf, servo_id, count, packet),
@@ -325,7 +341,8 @@ class ServoBus:
         """Broadcast writes get no reply; just clear our own echo."""
         self._port.reset_input_buffer()
         self._port.write(packet)
-        self._port.flush()
+        if self._flush_tx:
+            self._port.flush()
         self._drain_echo(len(packet))
 
     def write_goal_positions(self, ids, counts) -> None:
