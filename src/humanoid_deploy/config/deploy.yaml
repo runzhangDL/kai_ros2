@@ -16,15 +16,29 @@
 
     # ---- bus ---------------------------------------------------------------
     port: /dev/ttyTHS1
-    baudrate: 250000
+    # Raised from 250000 after all 13 servos were re-bauded. Must match
+    # humanoid_calibration's joint_limits.yaml, and must have passed
+    #   python3 tools/sts_tool.py --baud 500000 bustest 1,...,13
+    # at 100% on this robot's cabling before it is trusted.
+    baudrate: 500000
     timeout_ms: 30
 
     # ---- control rate ------------------------------------------------------
     # 0.0 = run at the rate recorded in the bundle, which is the rate the
-    # policy was trained at. This policy was retrained at 25 Hz to match the
-    # measured bus: bus_benchmark reported a 24 ms read+write cycle with a p99
-    # of 28 ms (a 35.7 Hz ceiling), so 25 Hz (40 ms) leaves 12 ms of headroom
-    # for retries and jitter.
+    # policy was trained at. The current policies were trained at 25 Hz to
+    # match the bus AT 250000 BAUD: bus_benchmark reported a 24 ms read+write
+    # cycle with a p99 of 28 ms (a 35.7 Hz ceiling), so 25 Hz (40 ms) left
+    # 12 ms of headroom for retries and jitter.
+    #
+    # THAT MEASUREMENT IS STALE at 500000 baud. Airtime roughly halves, but
+    # airtime was only ~9 ms of that 24 ms cycle -- the rest is per-servo
+    # turnaround, which baud does not change -- so expect ~19-20 ms, not 12.
+    # Re-measure before believing any number here:
+    #   ros2 run humanoid_deploy bus_benchmark --baud 500000
+    # Raising the rate also requires RETRAINING: one policy step must equal one
+    # physical timestep or every joint velocity in the observation is scaled
+    # wrong. Leaving this at 0.0 keeps deployment pinned to whatever the bundle
+    # was trained at, which stays correct no matter what the bus can do.
     #
     # Leave this at 0.0. Setting it by hand is how training and deployment
     # drift apart: one policy step would stop meaning one physical timestep,

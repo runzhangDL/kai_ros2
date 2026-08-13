@@ -65,7 +65,7 @@ class ServoNode(Node):
         p = self.declare_parameter
         p("bundle", "")
         p("port", "/dev/ttyTHS1")
-        p("baudrate", 250000)
+        p("baudrate", 500000)
         p("timeout_ms", 30)
         # 0.0 means "run at whatever rate the bundle was trained at", which is
         # the only value that cannot drift away from training. Override only to
@@ -442,7 +442,7 @@ class ServoNode(Node):
             f"discarding an implausible temperature for {name}: {first} C "
             f"(limit {limit}); immediate re-reads were {retries}. This is a bus "
             "glitch, not a hot servo -- but check it by hand if it repeats: "
-            f"python3 tools/sts_tool.py --baud 250000 reg {servo_id} 63"
+            f"python3 tools/sts_tool.py --baud 500000 reg {servo_id} 63"
         )
         return None
 

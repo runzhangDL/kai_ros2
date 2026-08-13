@@ -30,7 +30,7 @@ from .servo_bus import ServoBus, ServoBusError
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Measure sustainable control rate.")
     parser.add_argument("--port", default="/dev/ttyTHS1")
-    parser.add_argument("--baud", type=int, default=250000)
+    parser.add_argument("--baud", type=int, default=500000)
     parser.add_argument("--ids", default="1,2,3,4,5,6,7,8,9,10,11,12,13")
     parser.add_argument("--cycles", type=int, default=500)
     parser.add_argument("--timeout-ms", type=int, default=30)

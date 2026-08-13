@@ -251,7 +251,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", default="/dev/ttyTHS1")
-    parser.add_argument("--baud", type=int, default=250000)
+    parser.add_argument("--baud", type=int, default=500000)
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

@@ -123,7 +123,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", default="/dev/ttyTHS1")
-    parser.add_argument("--baud", type=int, default=250000)
+    parser.add_argument("--baud", type=int, default=500000)
     parser.add_argument("--id", type=int, required=True, help="ONE servo id")
     parser.add_argument("--amplitude", type=float, default=15.0,
                         help="step size in degrees (default 15)")

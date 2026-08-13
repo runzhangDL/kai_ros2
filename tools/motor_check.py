@@ -7,10 +7,30 @@ number, whether torque is engaged, its position, voltage and temperature.
 
     python3 tools/motor_check.py
     python3 tools/motor_check.py --release        # force torque off first
+    python3 tools/motor_check.py --hold           # stiffen at the current pose
     python3 tools/motor_check.py --backdrive 20   # 20 s: move joints by hand
 
-`--release` is the only thing here that writes, and it only ever writes 0 to
-Torque_Enable (RAM 40). It cannot touch EEPROM.
+`--release` and `--hold` are the only things here that write, and they only
+touch Torque_Enable (RAM 40) and Goal_Position (RAM 42). Neither can reach
+EEPROM.
+
+Measuring a joint under load
+----------------------------
+Everything in the actuator model was measured with the robot suspended, and the
+walking policy needs the stance leg's numbers. `--hold` is what makes that
+possible: it reads each servo's *present* position and writes that back as its
+goal before enabling torque, so the robot stiffens exactly where it already is
+instead of snapping to a stale target from a previous run.
+
+    # robot standing on the ground, gantry preventing a fall but not
+    # carrying its weight
+    python3 tools/motor_check.py --hold
+    python3 tools/servo_step.py  --id 11 --amplitude 15
+    python3 tools/servo_trace.py --id 11 --amplitude 15 --save knee_load.npz
+    python3 tools/motor_check.py --release
+
+The joint under test is driven by the step tool; the other twelve keep holding,
+which is what puts the robot's mass on the leg.
 
 Diagnosing a joint that will not move by hand
 ---------------------------------------------
@@ -35,10 +55,43 @@ import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-from sts_tool import Bus, REG_MODEL, REG_PRESENT_POS, REG_TORQUE, REG_VOLTAGE  # noqa: E402
+from sts_tool import (  # noqa: E402
+    Bus, REG_GOAL_POS, REG_MODEL, REG_PRESENT_POS, REG_TORQUE, REG_VOLTAGE,
+)
 
 DEFAULT_IDS = "1,2,3,4,5,6,7,8,9,10,11,12,13"
 DEG = 4096 / 360.0
+
+
+def hold(bus, ids, goal_speed=1000, acc=50):
+    """Stiffen every servo at the position it is already in.
+
+    The order matters and is the whole safety argument: read the present
+    position, write it as the goal, and only then enable torque. Enabling
+    torque first would make the servo drive to whatever goal was left in RAM by
+    the last thing that ran -- which on this robot has been a walking policy
+    mid-stride. A conservative goal speed limits the damage if a read is
+    corrupted and one joint gets a goal a long way from where it is.
+    """
+    print("stiffening at the current pose (read position -> write goal -> "
+          "torque on)")
+    held, failed = [], []
+    for sid in ids:
+        pos = bus.read2(sid, REG_PRESENT_POS, tries=6)
+        if pos is None:
+            failed.append(sid)
+            continue
+        bus.write(sid, REG_GOAL_POS,
+                  [pos & 0xFF, pos >> 8, 0, 0,
+                   goal_speed & 0xFF, (goal_speed >> 8) & 0xFF])
+        bus.write1(sid, REG_TORQUE, 1)
+        time.sleep(0.005)
+        held.append(sid)
+    print(f"  holding {len(held)}/{len(ids)} servos")
+    if failed:
+        print(f"  NOT HOLDING (no position read): {failed} -- these are limp, "
+              "support the robot before trusting it to stand")
+    return held
 
 
 def survey(bus, ids, release):
@@ -115,17 +168,27 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", default="/dev/ttyTHS1")
-    parser.add_argument("--baud", type=int, default=250000)
+    parser.add_argument("--baud", type=int, default=500000)
     parser.add_argument("--ids", default=DEFAULT_IDS)
     parser.add_argument("--release", action="store_true",
                         help="write 0 to Torque_Enable before reading")
+    parser.add_argument("--hold", action="store_true",
+                        help="stiffen every servo at its present position, so "
+                             "the robot can bear its own weight while one "
+                             "joint is measured under load")
     parser.add_argument("--backdrive", type=float, metavar="SECONDS",
                         help="then sample while you move joints by hand")
     args = parser.parse_args()
 
+    if args.hold and args.release:
+        parser.error("--hold and --release are opposites; pick one")
+
     ids = [int(x) for x in args.ids.split(",")]
     bus = Bus(args.port, args.baud)
     try:
+        if args.hold:
+            hold(bus, ids)
+            print()
         rows = survey(bus, ids, args.release)
         alive = [sid for sid, pos in rows if pos is not None]
         print(f"\n{len(alive)}/{len(ids)} servos answered")

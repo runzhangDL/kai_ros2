@@ -14,7 +14,7 @@ uncalibrated robot.
 | | |
 |---|---|
 | Port | `/dev/ttyTHS1` — Jetson Orin Nano 40-pin UART, pins 8/10 |
-| Baud | **250000** (all 13 servos were moved down from the STS factory 1000000) |
+| Baud | **500000** (all 13 servos were moved down from the STS factory 1000000) |
 | Wiring | Single-wire half-duplex: 74LVC1G125 open-drain TX + pull-up, RXD tapped off the same wire |
 
 Three consequences of that wiring are handled in `feetech_bus.py`, all of them
@@ -40,7 +40,7 @@ If you re-baud the bus, re-qualify it against the real cable lengths first —
 below it:
 
 ```bash
-python3 sts_tool.py --baud 250000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13
+python3 sts_tool.py --baud 500000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13
 ```
 
 ## Before you start
@@ -54,7 +54,7 @@ with the bring-up tool:
 
 ```bash
 for i in {1,2,3,4,5,6,7,8,9,10,11,12,13}; do
-  python3 sts_tool.py --port /dev/ttyTHS1 --baud 250000 torque $i 0
+  python3 sts_tool.py --port /dev/ttyTHS1 --baud 500000 torque $i 0
 done
 ```
 

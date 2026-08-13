@@ -21,7 +21,9 @@ Bus efficiency
 --------------
 Reading 13 servos one at a time costs 13 round trips. SYNC READ (0x82) asks
 all of them in one packet and they answer back to back, which roughly halves
-the airtime and is what makes a usable control rate possible at 250000 baud.
+the airtime and is what makes a usable control rate possible at all. Baud is a
+parameter, not a constant here -- the bus was re-qualified at 500000 and the
+achievable control rate must be re-measured with bus_benchmark after any change.
 SYNC WRITE (0x83) sends all 13 goal positions in a single packet with no
 replies at all.
 """

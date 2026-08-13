@@ -189,7 +189,7 @@ ros2 service call /humanoid_servo/estop std_srvs/srv/Trigger
 ```
 
 Release torque before handling the robot:
-`python3 sts_tool.py --baud 250000 torque <id> 0`
+`python3 sts_tool.py --baud 500000 torque <id> 0`
 
 ## Topics
 

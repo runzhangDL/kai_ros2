@@ -30,10 +30,13 @@ bus:
   port: /dev/ttyTHS1
 
   # All 13 servos have been reconfigured from the STS factory 1000000 down to
-  # 250000, which is what `sts_tool.py bustest` qualified as reliable for this
-  # robot's cable lengths and motor count. Re-qualify before changing it:
-  #   python3 sts_tool.py --baud 250000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13
-  baudrate: 250000
+  # 500000. Re-qualify before changing it, and after replacing any servo:
+  #   python3 sts_tool.py --baud 500000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13
+  # Anything below 100% means step back down to 250000, which held for a full
+  # standing run. Changing this does NOT invalidate the stored calibration --
+  # the fingerprint in joint_config.py deliberately excludes bus settings, so
+  # only a servo that was physically replaced needs recalibrating.
+  baudrate: 500000
 
   timeout_ms: 30            # how long to wait for a reply after the echo
   retries: 2                # re-reads before a read is reported as failed
@@ -52,7 +55,7 @@ calibration:
   # out single-sample noise / encoder glitches.
   reach_tolerance_deg: 1.0
   dwell_s: 0.20
-  # Live readout update rate. Each frame is one position read; at 250000 baud a
+  # Live readout update rate. Each frame is one position read; at 500000 baud a
   # transaction is well under a millisecond of airtime, so the servo's own
   # response delay dominates. Drop this if the readout feels jumpy.
   refresh_hz: 20

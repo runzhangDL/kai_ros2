@@ -12,7 +12,7 @@ to audit.
 Because nothing is written, torque is left exactly as the servos powered up.
 To back-drive the joints by hand, release torque first with the bring-up tool::
 
-    python3 sts_tool.py --port /dev/ttyTHS1 --baud 250000 torque <id> 0
+    python3 sts_tool.py --port /dev/ttyTHS1 --baud 500000 torque <id> 0
 
 Wire format
 -----------
