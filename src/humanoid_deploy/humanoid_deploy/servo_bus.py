@@ -144,24 +144,33 @@ class ServoBus:
     #: Class-level default so instances built with ``__new__`` -- the test
     #: harness does exactly that, to attach a fake port without opening a real
     #: one -- still have a defined transmit policy. ``__init__`` overrides it.
-    _flush_tx = True
+    _flush_tx = False
 
     def __init__(self, port: str, baudrate: int, timeout_ms: int = 30,
-                 retries: int = 1, flush_tx: bool = True) -> None:
+                 retries: int = 1, flush_tx: bool = False) -> None:
         if serial is None:
             raise ServoBusError("pyserial is not installed (pip3 install pyserial)")
         self.port_name = port
         self.baudrate = int(baudrate)
         self._reply_timeout = timeout_ms / 1000.0
         self._retries = max(0, int(retries))
-        # tcdrain() on this Tegra HS-UART costs ~11.8 ms for any packet over
-        # 16 bytes and ~0 below it -- a TX FIFO boundary, not airtime. The
-        # 13-servo sync read request is 21 bytes, so it pays that on every
-        # cycle, and it is essentially the entire 24 ms control cycle. Nothing
-        # here needs it: the half-duplex circuit echoes our transmit back, and
-        # waiting for that echo is a stricter barrier than waiting for the
-        # kernel to say it sent it. Kept switchable only so the change can be
-        # A/B'd against a bus that has been working.
+        # tcdrain() on this Tegra HS-UART costs a FLAT ~11.95 ms -- measured
+        # identical for 8, 12, 16, 17, 20, 21, 24, 32 and 47-byte transmits, so
+        # it is a fixed cost in the driver and has nothing to do with how much
+        # data there is (0.94 ms of airtime, at most). Paid twice per control
+        # cycle, it WAS the 24 ms control cycle.
+        #
+        # Nothing here needs it. This bus is half-duplex: the circuit echoes
+        # every transmit back onto RXD, and `_drain_echo` already waits for
+        # that echo. Waiting for bytes to come back is a strictly stronger
+        # barrier than waiting for the kernel to claim it sent them.
+        #
+        # Measured over 500 cycles, 13 servos, with and without:
+        #     with tcdrain     cycle p50 24.00 ms  p99 31.71 ms  100% reads
+        #     without tcdrain  cycle p50  5.07 ms  p99  6.58 ms  100% reads
+        # 4.7x faster with identical read success, so it is off by default.
+        # Set flush_tx=True to restore the old behaviour if a bus ever
+        # misbehaves in a way that points back here.
         self._flush_tx = bool(flush_tx)
         try:
             self._port = self._open(port, baudrate)

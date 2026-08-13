@@ -19,6 +19,11 @@ servos in one packet and they reply back to back, so:
     time each servo takes to start talking. That is the servos' own firmware
     and no amount of software will remove it.
 
+ANSWER, on this robot: the first. `tcdrain()` costs a flat ~11.95 ms per
+transmit at every packet size from 8 to 47 bytes, and it was ~24 of the 24 ms
+control cycle. Dropping it takes the cycle to 5.07 ms with identical 100% read
+success. `ServoBus(flush_tx=...)` controls it and is off by default.
+
 Read-only apart from the write section, which commands every servo to the
 position it is already in, exactly as `bus_benchmark` does. Nothing moves.
 """
@@ -144,14 +149,16 @@ def main():
                 first = p50
             print(f"   {count:>7}{p50:>10.2f}{p99:>10.2f}{air:>13.2f}"
                   f"{p50 - air:>13.2f}")
-        # Do NOT fit a straight line through this: the cost is flat at about
-        # 0.2 ms/servo up to 8 servos and then jumps ~8.7 ms between 8 and 13,
-        # which a linear fit launders into a fake "0.85 ms per servo". The jump
-        # is where the request packet crosses 16 bytes -- a TX FIFO boundary --
-        # and section 4 confirms it is tcdrain, not the servos.
-        print("\n   Read the deltas, not a slope: a cliff between two sizes is a")
-        print("   buffer boundary, and averaging across it invents a per-servo")
-        print("   cost that is not there.")
+        # Do NOT fit a straight line through this. On the robot every row
+        # comes back at ~12.00 ms regardless of servo count, which is the
+        # signature of a fixed per-transaction cost -- section 4 identifies it
+        # as tcdrain. An earlier run of this tool showed 1.8 ms at 1 servo
+        # rising to 12.0 at 13, and a linear fit through that laundered the
+        # step into a fake "0.85 ms per servo" and a confident, wrong verdict
+        # that the servos' own firmware was to blame.
+        print("\n   Read the rows, not a slope. Flat across servo counts means a")
+        print("   fixed per-transaction cost, not per-servo turnaround; averaging")
+        print("   over a step invents a per-servo cost that is not there.")
 
         # ---- 4. is tcdrain the cost, and where is the cliff? ----------
         print("\n4. tcdrain (flush) vs transmit size -- the suspected cause")
@@ -171,8 +178,10 @@ def main():
             f = statistics.median(s[1] for s in samples) * 1e3
             print(f"   {nbytes:>7}{w:>11.2f}{f:>11.2f}{nbytes * byte_us / 1e3:>13.2f}")
         bus._port.reset_input_buffer()
-        print("   A step here is a FIFO boundary. Everything to its right pays a")
-        print("   fixed cost that has nothing to do with how much data there is.")
+        print("   MEASURED: flat ~11.95 ms at every size from 8 to 47 bytes. There")
+        print("   is no size dependence and no FIFO boundary -- it is a fixed cost")
+        print("   in the driver, and it dwarfs the <1 ms of airtime it is nominally")
+        print("   waiting for.")
 
         # ---- 5. does dropping flush actually work? --------------------
         print("\n5. sync read of 13 servos, with and without tcdrain")

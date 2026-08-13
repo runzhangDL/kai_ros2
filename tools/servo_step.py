@@ -161,16 +161,31 @@ def main():
 
         limits = calibration_for(args.id)
         step = args.amplitude * DEG
-        target = int(round(start + step))
         if limits is not None:
             name, lo, hi = limits
-            clamped = max(lo, min(hi, target))
-            if clamped != target:
+            # Several joints on this robot rest AT one end of their travel --
+            # both hip rolls only abduct, and the knees stand straight against
+            # their stop -- so which sign has room is a property of the joint,
+            # not something the caller should have to remember. Getting it
+            # wrong does not fail loudly: the step silently clamps to 3 deg and
+            # reports a "stall" that is really a 3 deg move. That has now cost
+            # two rounds of measurements, so pick the direction here.
+            forward = max(lo, min(hi, int(round(start + step))))
+            reverse = max(lo, min(hi, int(round(start - step))))
+            if (abs(forward - start) < 0.5 * abs(step)
+                    and abs(reverse - start) > abs(forward - start)):
+                print(f"{name} has only {abs(forward - start) / DEG:.1f} deg of "
+                      f"room in the requested direction but "
+                      f"{abs(reverse - start) / DEG:.1f} deg the other way -- "
+                      f"stepping {-args.amplitude:+.0f} deg instead")
+                step = -step
+            target = max(lo, min(hi, int(round(start + step))))
+            if target != int(round(start + step)):
                 print(f"clamping the step to {name}'s calibrated travel "
-                      f"[{lo}, {hi}]: {target} -> {clamped}")
-                target = clamped
+                      f"[{lo}, {hi}]: {int(round(start + step))} -> {target}")
             print(f"joint {name} (id {args.id}), calibrated travel [{lo}, {hi}]")
         else:
+            target = int(round(start + step))
             print("no calibration file found -- stepping without a travel limit; "
                   "keep the amplitude small")
 
@@ -221,6 +236,24 @@ def main():
             if peak < 0.5 * args.speed / DEG:
                 print("\n  NOTE: peak is well under the goal-speed cap, so "
                       "acceleration or torque is the limit, not the register.")
+            # Which of the two limits actually bound? A short move never gets
+            # up to speed, so it only ever measures acceleration and says
+            # nothing about V_MAX -- and V_MAX is what the env's rate limiter
+            # clips against on every cycle. The tell is measured peak versus
+            # the peak that acceleration alone predicts: if the move flattened
+            # off well below sqrt(a*d), it hit a velocity ceiling and that
+            # ceiling is the number to report.
+            if implied is not None and implied > 1e-6:
+                ratio = peak / implied
+                print(f"\n  measured peak / acceleration-implied peak = "
+                      f"{ratio:.2f}")
+                if ratio < 0.75:
+                    print(f"  -> VELOCITY-LIMITED. It plateaued: V_MAX is about "
+                          f"{peak:.0f} deg/s = {peak * 3.14159 / 180:.2f} rad/s.")
+                else:
+                    print("  -> acceleration-limited for this distance; this run "
+                          "does NOT\n     measure V_MAX. Repeat with a much "
+                          "larger --amplitude to find it.")
 
         bus.write(args.id, REG_GOAL_POS,
                   [start & 0xFF, start >> 8, 0, 0, 0xB8, 0x0B])

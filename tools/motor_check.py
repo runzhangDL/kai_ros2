@@ -140,7 +140,25 @@ def survey(bus, ids, release):
     return rows
 
 
-def backdrive(bus, ids, seconds):
+def backdrive(bus, ids, seconds, engaged=()):
+    """Sample position while the operator moves joints by hand.
+
+    A joint whose torque is still ON cannot be back-driven, and it reports as
+    "barely moved" -- indistinguishable from a seized gearbox, which is exactly
+    the fault this mode exists to find. So refuse to start quietly: say which
+    joints are engaged and how to release them. Deliberately NOT auto-released,
+    because a robot standing on its own legs collapses the moment torque drops.
+    """
+    if engaged:
+        print(f"\n  *** {len(engaged)} joint(s) still have TORQUE ON: "
+              f"{sorted(engaged)}")
+        print("  They cannot be moved by hand and will read as 'barely moved',")
+        print("  which is the same signature as a seized joint. Support the")
+        print("  robot, then re-run as:")
+        print("      python3 -u tools/motor_check.py --release --backdrive "
+              f"{seconds:.0f}")
+        print("  Not released automatically: a robot holding itself up would "
+              "drop.\n")
     print(f"\nSampling for {seconds:.0f} s. Move EVERY joint by hand, one at a "
           f"time, through a few degrees.")
     print("A joint you moved that shows ~0 counts of range is stuck.\n")
@@ -201,7 +219,12 @@ def main():
         alive = [sid for sid, pos in rows if pos is not None]
         print(f"\n{len(alive)}/{len(ids)} servos answered")
         if args.backdrive:
-            backdrive(bus, alive, args.backdrive)
+            engaged = []
+            for sid in alive:
+                state = bus.read(sid, REG_TORQUE, 1)
+                if state and state[0]:
+                    engaged.append(sid)
+            backdrive(bus, alive, args.backdrive, engaged)
     finally:
         bus.close()
     return 0

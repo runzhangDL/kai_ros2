@@ -170,6 +170,95 @@ below that the robot is marching in place and there is nothing to deploy.
 
 ---
 
+## 5a. Hardware, re-measured 2026-08-13 (bus, actuators, new knee)
+
+The bus was re-bauded to 500000, the right knee servo replaced and recalibrated,
+and the actuator model measured properly for the first time. Three results
+change what training should assume.
+
+### The control loop is 4.7x faster
+
+`tcdrain()` costs a flat ~11.95 ms per transmit on this Tegra UART -- measured
+identical at every packet size from 8 to 47 bytes, against at most 0.94 ms of
+airtime. Paid twice a cycle, it *was* the 24 ms control cycle. It is not needed:
+the bus is half-duplex and already waits for its own transmit to echo back,
+which is a stronger barrier. Removed.
+
+| | cycle p50 | p99 | read success | ceiling |
+|---|---|---|---|---|
+| before | 24.00 ms | 31.71 ms | 100% | 31.5 Hz |
+| after | **5.07 ms** | **6.58 ms** | 100% | **152 Hz** |
+
+Baud had nothing to do with it -- 250000 and 500000 measured identically at
+24 ms. **50 Hz is now comfortable** (3x headroom on p99). 100 Hz is reachable
+but buys little: dead time is unchanged at ~80 ms, so total loop lag only goes
+120 ms -> 100 ms -> 90 ms, while training cost scales with `frame_skip`.
+
+### Dead time: ~80 ms, unchanged, and lower under load
+
+Seven joints, `servo_trace.py` at acc=100: **72-92 ms free, 72 ms loaded**.
+Identical to the 84 ms measured at 250000 baud, confirming transport delay is
+the servo's internal loop and not the bus. At 25 Hz that is 2 cycles; at 50 Hz
+it is 4. `_LIMITS_MEASURED_AT_HZ` already converts correctly.
+
+### The roll joints are far weaker under load than the guess assumed
+
+This is the important one. Measured loaded, 12 deg steps, robot standing:
+
+| joint | loaded a_max |
+|---|---|
+| right_knee_pitch (11) | 6.7 rad/s^2 |
+| left_knee_pitch (3) | 4.0 rad/s^2 |
+| **right_hip_roll (9)** | **1.8 rad/s^2** |
+| **left_hip_roll (5)** | **stalled at 86%, residual 1.67 deg** |
+
+**Hip roll under load is 3-4x weaker than knee under load, symmetrically on
+both sides.** `UNMEASURED_LIMITS` models the rolls at `a_max` 11.0 against the
+knees' 17.0 -- a ratio of 1:1.5, where the measurement says 1:3.7.
+
+Use the *ratio*, not the absolute number: step response and the trajectory fit
+that produced the existing table disagree by a consistent factor, but that bias
+cancels between joints measured the same way. Scaling off the knee's 17.0:
+
+```python
+UNMEASURED_LIMITS = (1.35, 4.6, 2)      # was (1.35, 11.0, 2)
+```
+
+This is the single most likely explanation for the lateral drift that never
+yielded: the joints that reject a lateral disturbance were modelled 2.4x
+stronger than they are, so every policy trained so far learned to lean on
+authority the robot does not have.
+
+### Free-hanging numbers, all seven leg joints, acc=100
+
+Small steps bias `a_max` low -- `t90` includes the ~80 ms dead time, which is a
+large fraction of a short move. The 60 deg steps are the trustworthy ones:
+
+| joint | a_max @20 deg | a_max @60 deg | peak @60 deg |
+|---|---|---|---|
+| left_hip_pitch (6) | 5.7 | **7.3** | 154 deg/s |
+| right_knee_pitch (11) | 6.8 | **6.7** | 146 deg/s |
+| right_hip_roll (9) | 2.9 | **6.9** | 156 deg/s |
+| left_hip_roll (5) | 6.3 | — | — |
+| left_knee_pitch (3) | 6.1 | — | — |
+| left_ankle_roll (2) | 6.1 | — | — |
+| right_ankle_roll (12) | 4.7 | — | — |
+
+Free `a_max` is ~7 rad/s^2 and remarkably uniform across joint types.
+
+### v_max has never actually been observed
+
+Every step, including 60 deg, was still accelerating on arrival -- measured peak
+/ acceleration-implied peak was 0.96-1.01, never below 0.75. So **v_max >= 2.7
+rad/s** on hip pitch, knee pitch and hip roll, and the table's 1.35-2.45 values
+are all *below* a speed the joints were observed passing through without
+plateauing. That column is too low and is a fit artifact, not a measurement.
+
+Note `servo_goal_speed: 2000` (176 deg/s) is close to the measured 156 deg/s
+free peak; `walk.yaml` already raises it to 3000.
+
+---
+
 ## 6. Deployment-side facts worth having
 
 - **Control law**, unchanged and correct in the bundle:

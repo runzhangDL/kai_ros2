@@ -30,19 +30,18 @@
     # cycle with a p99 of 28 ms (a 35.7 Hz ceiling), so 25 Hz (40 ms) left
     # 12 ms of headroom for retries and jitter.
     #
-    # THAT MEASUREMENT IS STALE at 500000 baud. Airtime roughly halves, but
-    # airtime was only ~9 ms of that 24 ms cycle -- the rest is per-servo
-    # turnaround, which baud does not change -- so expect ~19-20 ms, not 12.
-    # Re-measure before believing any number here:
+    # BOTH OF THOSE NUMBERS ARE NOW OBSOLETE. The 24 ms was never airtime and
+    # never per-servo turnaround: it was tcdrain(), a flat ~11.95 ms per
+    # transmit in the Tegra UART driver, paid twice a cycle. servo_bus no
+    # longer calls it -- the echo it already waits for is a stronger barrier.
+    # Measured after that change, 500 cycles, 13 servos at 500000 baud:
+    #   cycle p50 5.07 ms, p99 6.58 ms, 100% read success -> ceiling 152 Hz
+    # Re-measure after any bus change:
     #   ros2 run humanoid_deploy bus_benchmark --baud 500000
     # Raising the rate also requires RETRAINING: one policy step must equal one
     # physical timestep or every joint velocity in the observation is scaled
     # wrong. Leaving this at 0.0 keeps deployment pinned to whatever the bundle
     # was trained at, which stays correct no matter what the bus can do.
-    #
-    # Leave this at 0.0. Setting it by hand is how training and deployment
-    # drift apart: one policy step would stop meaning one physical timestep,
-    # and every joint velocity in the observation would be scaled wrong.
     control_rate_hz: 0.0
 
     # ---- START HERE --------------------------------------------------------
