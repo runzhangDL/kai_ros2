@@ -44,6 +44,14 @@ from humanoid_calibration.calibration_store import CalibrationStore  # noqa: E40
 from humanoid_deploy.servo_bus import ServoBus  # noqa: E402
 
 
+# Piping into `tee` or a file switches Python's stdout from line-buffered to
+# BLOCK-buffered, so a long-running scan prints nothing at all until it exits
+# or fills 4 KB -- which reads exactly like a hang, and cost a bring-up session.
+# Line buffering costs nothing here and keeps `| tee` honest.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
 def load_reference(bundle_path, motion_path):
     """Reference joint angles in ACTUATOR order, clipped to the model limits.
 

@@ -67,6 +67,14 @@ VERIFY_TOLERANCE = 24   # counts; the shaft settles slightly after the write
 DEFAULT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 
+# Piping into `tee` or a file switches Python's stdout from line-buffered to
+# BLOCK-buffered, so a long-running scan prints nothing at all until it exits
+# or fills 4 KB -- which reads exactly like a hang, and cost a bring-up session.
+# Line buffering costs nothing here and keeps `| tee` honest.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
 def calibration_path():
     explicit = os.environ.get("HUMANOID_CALIBRATION_FILE")
     if explicit:

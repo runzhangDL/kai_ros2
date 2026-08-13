@@ -4,14 +4,19 @@ Run in order. Each phase gates the next — if a phase fails, stop and send the
 output rather than continuing, because everything after it assumes the bus is
 sound.
 
-Everything here is run on the **robot** (Jetson), from `~/Project/ROS2_Humble`.
+Everything here is run on the **robot** (Jetson), from the repo root.
 
 ```bash
-cd ~/Project/ROS2_Humble
+cd ~/kai_ros2-main          # the repo root on the robot
 colcon build --packages-select humanoid_calibration humanoid_deploy
 source install/setup.bash
 mkdir -p ~/hwcheck
 ```
+
+**Always `python3 -u` when piping to `tee`.** Without it Python block-buffers
+stdout and a long command prints nothing until it exits, which is
+indistinguishable from a hang. The tools now set line buffering themselves, but
+`-u` costs nothing and covers anything that has not been updated.
 
 **Throughout: the robot hangs from the gantry, feet clear of the ground**,
 except where a phase says otherwise.
@@ -27,7 +32,7 @@ is flaky" rather than as an obvious error — so this runs before anything drive
 a motor.
 
 ```bash
-python3 tools/sts_tool.py scan --bauds 500000,1000000,250000,128000,115200 --full \
+python3 -u tools/sts_tool.py --baud 500000 scan --max-id 20 \
   2>&1 | tee ~/hwcheck/00_scan.txt
 ```
 
@@ -39,6 +44,11 @@ python3 tools/sts_tool.py scan --bauds 500000,1000000,250000,128000,115200 --ful
 | id 11 missing, something extra at 1000000 | the new servo was never re-bauded → Phase 1 |
 | id 11 missing, nothing else anywhere | wiring or a dead servo — stop |
 | id 1 flaky/intermittent | **likely two servos both on id 1** → Phase 1 |
+
+Only widen the search if something is actually missing. `--bauds
+500000,1000000,250000,128000,115200 --full` sweeps 254 ids across five rates:
+a silent id costs 80 ms, so that is ~100 s of near-total silence and is not the
+first thing to reach for.
 
 ---
 
@@ -63,7 +73,7 @@ Then re-run Phase 0 and confirm a clean 13.
 ## Phase 2 — does 500000 actually hold on this cabling
 
 ```bash
-python3 tools/sts_tool.py --baud 500000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13 \
+python3 -u tools/sts_tool.py --baud 500000 bustest 1,2,3,4,5,6,7,8,9,10,11,12,13 \
   2>&1 | tee ~/hwcheck/02_bustest.txt
 ```
 
@@ -73,7 +83,7 @@ completed a full standing run at that rate, so it is a known-good fallback, not
 a defeat.
 
 ```bash
-python3 tools/motor_check.py 2>&1 | tee ~/hwcheck/02_motor_check.txt
+python3 -u tools/motor_check.py 2>&1 | tee ~/hwcheck/02_motor_check.txt
 ```
 
 **Expect:** 13/13 answer, all `torque off`, 37–42 °C, ~12 V. The new servo's
@@ -83,7 +93,7 @@ Then confirm the new knee is mechanically free — the old one was seized, which
 is how this started:
 
 ```bash
-python3 tools/motor_check.py --backdrive 20
+python3 -u tools/motor_check.py --backdrive 20
 # move the RIGHT KNEE by hand through a few degrees during the 20 s
 ```
 
@@ -100,15 +110,15 @@ deployment refuses to start in that state, and this is the fix.
 
 ```bash
 # read-only first: where does id 11 currently sit?
-python3 tools/sts_recenter.py probe --id 11 2>&1 | tee ~/hwcheck/03_probe.txt
+python3 -u tools/sts_recenter.py probe --id 11 2>&1 | tee ~/hwcheck/03_probe.txt
 ```
 
 Then, **with the right knee posed at its standing position** (leg straight, the
 pose the calibration calls 0°) and the robot supported:
 
 ```bash
-python3 tools/sts_recenter.py one --id 11            # dry run, shows the plan
-python3 tools/sts_recenter.py one --id 11 --apply
+python3 -u tools/sts_recenter.py one --id 11            # dry run, shows the plan
+python3 -u tools/sts_recenter.py one --id 11 --apply
 ```
 
 This only touches id 11. It backs up the old correction value first and updates
@@ -171,21 +181,21 @@ walking policy is most sensitive to and the one a step fit determines worst.
 
 ```bash
 for ID in 3 6 11; do
-  python3 tools/servo_step.py  --id $ID --amplitude 20 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
-  python3 tools/servo_trace.py --id $ID --amplitude 20 --save ~/hwcheck/05a_trace_$ID.npz \
+  python3 -u tools/servo_step.py  --id $ID --amplitude 20 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_trace.py --id $ID --amplitude 20 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
 
 # the roll joints, which have NEVER been measured and still carry a guessed
 # (1.35 rad/s, 11.0 rad/s^2). Smaller amplitude: the ankle rolls only span +-20 deg.
 for ID in 5 9; do
-  python3 tools/servo_step.py  --id $ID --amplitude 15 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
-  python3 tools/servo_trace.py --id $ID --amplitude 15 --save ~/hwcheck/05a_trace_$ID.npz \
+  python3 -u tools/servo_step.py  --id $ID --amplitude 15 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_trace.py --id $ID --amplitude 15 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
 for ID in 2 12; do
-  python3 tools/servo_step.py  --id $ID --amplitude 10 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
-  python3 tools/servo_trace.py --id $ID --amplitude 10 --save ~/hwcheck/05a_trace_$ID.npz \
+  python3 -u tools/servo_step.py  --id $ID --amplitude 10 2>&1 | tee ~/hwcheck/05a_step_$ID.txt
+  python3 -u tools/servo_trace.py --id $ID --amplitude 10 --save ~/hwcheck/05a_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05a_trace_$ID.txt
 done
 ```
@@ -199,7 +209,7 @@ the gap that has been open since the beginning.
 carrying its weight.** Then:
 
 ```bash
-python3 tools/motor_check.py --hold        # every joint stiffens where it is
+python3 -u tools/motor_check.py --hold        # every joint stiffens where it is
 ```
 
 `--hold` reads each servo's present position and writes it back as the goal
@@ -208,13 +218,13 @@ standing and stable, then measure the load-bearing joints one at a time:
 
 ```bash
 for ID in 3 5 9 11; do
-  python3 tools/servo_step.py  --id $ID --amplitude 12 2>&1 | tee ~/hwcheck/05b_step_$ID.txt
-  python3 tools/servo_trace.py --id $ID --amplitude 12 --save ~/hwcheck/05b_trace_$ID.npz \
+  python3 -u tools/servo_step.py  --id $ID --amplitude 12 2>&1 | tee ~/hwcheck/05b_step_$ID.txt
+  python3 -u tools/servo_trace.py --id $ID --amplitude 12 --save ~/hwcheck/05b_trace_$ID.npz \
     2>&1 | tee ~/hwcheck/05b_trace_$ID.txt
-  python3 tools/motor_check.py --hold      # re-stiffen; the step tool releases its joint
+  python3 -u tools/motor_check.py --hold      # re-stiffen; the step tool releases its joint
 done
 
-python3 tools/motor_check.py --release
+python3 -u tools/motor_check.py --release
 ```
 
 Smaller amplitude here on purpose — the robot is standing on these joints.

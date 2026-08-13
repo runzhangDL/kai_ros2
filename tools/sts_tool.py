@@ -52,6 +52,14 @@ PING, READ, WRITE = 0x01, 0x02, 0x03
 BROADCAST = 0xFE  # deliberately NOT used by this tool
 
 
+# Piping into `tee` or a file switches Python's stdout from line-buffered to
+# BLOCK-buffered, so a long-running scan prints nothing at all until it exits
+# or fills 4 KB -- which reads exactly like a hang, and cost a bring-up session.
+# Line buffering costs nothing here and keeps `| tee` honest.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
 class Bus:
     def __init__(self, port, baud, timeout=0.06, verbose=False):
         self.verbose = verbose
@@ -211,11 +219,20 @@ def cmd_scan(bus, args):
         bauds = [args.baud] + [b for b in sorted(BAUD_INDEX, reverse=True)
                                if b != args.baud]
     ids = range(0, 254) if args.full else range(0, args.max_id + 1)
+    # A silent id costs tries*(deadline+backoff) = 0.08 s, so --full over five
+    # bauds is ~100 s with nothing to print for most of it. Say so up front and
+    # tick, rather than looking hung -- which is exactly how it was read.
+    budget = len(ids) * len(bauds) * 0.08
+    if budget > 10.0:
+        print(f"scanning {len(ids)} ids x {len(bauds)} baud rates; a silent id "
+              f"costs 80 ms, so allow ~{budget:.0f}s. Narrow it with --max-id.")
     found_any = False
     for baud in bauds:
         bus.reopen(baud)
         print(f"-- scanning at {baud} baud (ids {ids.start}..{ids.stop-1}) --")
         for sid in ids:
+            if sid and sid % 32 == 0:
+                print(f"   ... {sid}/{ids.stop - 1}")
             r = bus.ping(sid, deadline=0.03, tries=2)
             if r:
                 found_any = True

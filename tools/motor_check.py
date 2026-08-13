@@ -63,6 +63,14 @@ DEFAULT_IDS = "1,2,3,4,5,6,7,8,9,10,11,12,13"
 DEG = 4096 / 360.0
 
 
+# Piping into `tee` or a file switches Python's stdout from line-buffered to
+# BLOCK-buffered, so a long-running scan prints nothing at all until it exits
+# or fills 4 KB -- which reads exactly like a hang, and cost a bring-up session.
+# Line buffering costs nothing here and keeps `| tee` honest.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
 def hold(bus, ids, goal_speed=1000, acc=50):
     """Stiffen every servo at the position it is already in.
 
