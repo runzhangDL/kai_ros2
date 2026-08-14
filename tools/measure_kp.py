@@ -2,30 +2,32 @@
 """measure_kp.py -- what is the position servo's actual stiffness?
 
 Everything the training side assumes about this robot's compliance rests on
-inference, and one of those inferences was already wrong: a crouch leaning
-5-6.5 deg was read as "the servos are 5x softer than the model", when the pose
-being commanded was clamped 2 deg short at one ankle and the robot was simply
-starting to fall. This measures kp instead of arguing about it.
+inference, and the inference has now been wrong in both directions. This
+measures kp with nothing but the robot's own leg.
 
 The method
 ----------
-A ``position`` actuator at rest satisfies ``tau = kp * (target - present)``, so
-kp is torque divided by steady-state error. Measuring that directly does not
-work on this robot: at the torques available the error is around a degree, and
-friction and deadband alone were worth 0.18-1.67 deg on the joints stepped on
-2026-08-13. The stiction swamps the signal.
+A ``position`` actuator at rest satisfies ``tau = kp * (target - present)``.
+Swing one hip through its range with the robot hanging and the leg's own weight
+supplies a known, smoothly varying torque -- +-1.15 N.m at +-75 deg, passing
+through zero when the leg hangs straight down. Read the steady-state error at
+each angle and fit a line:
 
-So this measures a DIFFERENCE. Hold one joint at one angle, read it, add a
-known mass at a known lever arm, read it again. The pose is identical and the
-joint is approached from the same side both times, so friction and deadband are
-the same in both readings and cancel:
+    error = tau / kp + offset
 
-    kp = (m * g * r) / (present_loaded - present_unloaded)
+The SLOPE gives kp. The INTERCEPT absorbs friction and deadband, which is why
+this works where a single reading does not: stiction was worth 0.18-1.67 deg on
+the joints measured on 2026-08-13, comparable to the whole signal at kp 50. A
+constant offset moves the intercept and leaves the slope alone.
 
-    python3 -u tools/measure_kp.py --id 6 --angle 80 --mass-g 200 --lever 0.445
+    python3 -u tools/measure_kp.py
 
-THIS MOVES A MOTOR, and it deliberately loads it near its torque limit. Read
-the safety notes printed at startup before running it.
+Every angle is approached from the same direction, so the friction offset is
+consistent across the sweep rather than flipping sign halfway.
+
+THE ROBOT MUST BE SUSPENDED, hanging vertically, with at least 30 cm of clear
+space in front of and behind it -- the leg swings through 150 degrees. Nothing
+to hang, nothing to hold, no interaction once it starts.
 """
 
 import argparse
@@ -38,14 +40,21 @@ from sts_tool import Bus, REG_ACC, REG_GOAL_POS, REG_PRESENT_POS, REG_TORQUE  # 
 
 CPR = 4096
 DEG = CPR / 360.0
-G = 9.80665
+
+#: Gravity hold torque at left_hip_pitch (id 6) with the robot suspended and
+#: every other joint at zero, computed from robot.xml. Degrees -> N.m. The
+#: robot has no mujoco, so this table is baked in; regenerate it if the model's
+#: masses change.
+HIP_PITCH_TAU = {
+    -75: -1.145, -50: -0.906, -25: -0.497, 0: 0.005,
+    25: 0.506, 50: 0.912, 75: 1.148,
+}
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
 
 def calibration_for(servo_id):
-    """(name, zero_raw, direction, lo_raw, hi_raw) for this servo, or None."""
     import yaml
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     path = os.environ.get("HUMANOID_CALIBRATION_FILE") or os.path.join(
@@ -61,17 +70,19 @@ def calibration_for(servo_id):
     return None
 
 
-def settle_read(bus, servo_id, seconds=1.5, samples=40):
-    """Median position after letting the joint come to rest."""
-    time.sleep(seconds)
-    values = []
-    while len(values) < samples:
+def hold_and_read(bus, servo_id, raw_target, speed, settle_s, samples=30):
+    bus.write(servo_id, REG_GOAL_POS,
+              [raw_target & 0xFF, raw_target >> 8, 0, 0,
+               speed & 0xFF, (speed >> 8) & 0xFF])
+    time.sleep(settle_s)
+    seen = []
+    while len(seen) < samples:
         v = bus.read2(servo_id, REG_PRESENT_POS, tries=3)
         if v is not None:
-            values.append(v)
+            seen.append(v)
         time.sleep(0.01)
-    values.sort()
-    return values[len(values) // 2], values[0], values[-1]
+    seen.sort()
+    return seen[len(seen) // 2]
 
 
 def main():
@@ -80,95 +91,97 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", default="/dev/ttyTHS1")
     parser.add_argument("--baud", type=int, default=500000)
-    parser.add_argument("--id", type=int, default=6,
-                        help="servo to test (6 = left_hip_pitch)")
-    parser.add_argument("--angle", type=float, default=80.0,
-                        help="joint angle to hold, degrees, in calibrated sign")
-    parser.add_argument("--mass-g", type=float, default=200.0,
-                        help="mass you will hang, in grams")
-    parser.add_argument("--lever", type=float, default=0.445,
-                        help="metres from the joint axis to where it hangs, "
-                             "measured HORIZONTALLY")
-    parser.add_argument("--speed", type=int, default=1200)
+    parser.add_argument("--id", type=int, default=6, help="6 = left_hip_pitch")
+    parser.add_argument("--speed", type=int, default=800)
     parser.add_argument("--acc", type=int, default=100)
+    parser.add_argument("--settle", type=float, default=2.5)
     args = parser.parse_args()
 
     cal = calibration_for(args.id)
     if cal is None:
         sys.exit("no calibration found; this needs the joint's zero and direction")
     name, zero, direction, lo, hi = cal
-    target = int(round(zero + direction * args.angle * DEG))
-    if not lo <= target <= hi:
-        sys.exit(f"{args.angle:+.0f} deg is raw {target}, outside {name}'s "
-                 f"calibrated travel [{lo}, {hi}]. Pick a smaller --angle.")
 
-    tau_extra = args.mass_g / 1000.0 * G * args.lever
-    print(f"joint {name} (id {args.id}), holding {args.angle:+.0f} deg "
-          f"(raw {target})")
-    print(f"added torque will be {args.mass_g:.0f} g x {args.lever:.3f} m = "
-          f"{tau_extra:.3f} N.m")
-    print(f"expected deflection: {tau_extra / 50 * 180 / 3.14159:.2f} deg at "
-          f"kp 50, {tau_extra / 10 * 180 / 3.14159:.2f} deg at kp 10\n")
+    angles = sorted(HIP_PITCH_TAU)          # ascending: one approach direction
+    plan = []
+    for a in angles:
+        raw = int(round(zero + direction * a * DEG))
+        if lo <= raw <= hi:
+            plan.append((a, raw))
+    if len(plan) < 4:
+        sys.exit(f"{name}'s calibrated travel [{lo}, {hi}] only admits "
+                 f"{len(plan)} of the {len(angles)} sweep angles; too few to fit")
+
+    print(f"joint {name} (id {args.id}), sweeping "
+          f"{plan[0][0]:+.0f}..{plan[-1][0]:+.0f} deg in {len(plan)} steps")
+    print("The leg's own weight is the load -- nothing to attach.\n")
     print("SAFETY")
-    print("  * The robot must be SUSPENDED, feet clear, so the only load on this")
-    print("    joint is the limb and the mass you add.")
-    print("  * This joint will be near its torque limit (2.35 N.m). Do not add")
-    print("    more mass than asked for -- a saturated servo reads as infinite")
-    print("    compliance and the measurement becomes meaningless.")
-    print("  * Hang the mass gently. Dropping it on shock-loads the gearbox.")
-    print("  * Keep clear of the limb; it is holding a load under power.\n")
-    input("press ENTER when the robot is hanging clear, or Ctrl-C to abort... ")
+    print("  * SUSPEND the robot, hanging vertically, feet well clear.")
+    print("  * The leg swings through ~150 deg fore and aft. Clear 30 cm each")
+    print("    way, and keep hands out of its arc.")
+    print("  * Do not touch or lift the robot once it starts -- handling it is")
+    print("    exactly what invalidates this measurement.")
+    print("  * Torque is released at the end.\n")
+    input("press ENTER when it is hanging clear, or Ctrl-C to abort... ")
 
     bus = Bus(args.port, args.baud)
+    rows = []
     try:
         if not bus.ping(args.id, tries=6):
             sys.exit(f"id {args.id} did not answer")
         bus.write1(args.id, REG_TORQUE, 1)
         bus.write1(args.id, REG_ACC, args.acc)
-        bus.write(args.id, REG_GOAL_POS,
-                  [target & 0xFF, target >> 8, 0, 0,
-                   args.speed & 0xFF, (args.speed >> 8) & 0xFF])
-        print(f"\nmoving to {args.angle:+.0f} deg ...")
-        unloaded, u_lo, u_hi = settle_read(bus, args.id, seconds=3.0)
-        print(f"  unloaded: present {unloaded}  (spread {u_hi - u_lo} counts)"
-              f"  error {abs(unloaded - target) / DEG:.2f} deg")
+        # Start below the sweep so every point is approached the same way.
+        hold_and_read(bus, args.id, plan[0][1], args.speed, args.settle + 1.5)
 
-        print(f"\n>>> Now hang {args.mass_g:.0f} g at {args.lever:.3f} m from the "
-              f"joint axis.")
-        print(">>> Same limb, hanging straight down, gently.")
-        input("    press ENTER once it is on and still... ")
-        loaded, l_lo, l_hi = settle_read(bus, args.id, seconds=3.0)
-        print(f"  loaded:   present {loaded}  (spread {l_hi - l_lo} counts)"
-              f"  error {abs(loaded - target) / DEG:.2f} deg")
-
-        delta_counts = abs(loaded - unloaded)
-        delta_rad = delta_counts / DEG * 3.14159265 / 180.0
-        print(f"\n  deflection under load: {delta_counts} counts = "
-              f"{delta_counts / DEG:.2f} deg")
-        if delta_counts < 3:
-            print("\n  TOO SMALL TO TRUST -- under 3 counts is the encoder's own")
-            print("  resolution. Either the servo is very stiff, or the mass is")
-            print("  not actually loading this joint. Check the lever arm is")
-            print("  horizontal and the mass is beyond the joint, not before it.")
-        else:
-            kp = tau_extra / delta_rad
-            print(f"\n  kp = {tau_extra:.3f} N.m / {delta_rad:.4f} rad = "
-                  f"{kp:.1f} N.m/rad")
-            print(f"  the XML models kp = 50; kp_scale = {kp / 50:.2f}")
-            if kp > 35:
-                print("  -> consistent with the XML. Training's 0.60-1.40 span is right.")
-            elif kp > 18:
-                print("  -> softer than the XML but nowhere near the retracted kp 10.")
-            else:
-                print("  -> genuinely soft. Tell me: the training kp span needs to move.")
-        print("\n>>> Remove the mass before anything else.")
-        input("    press ENTER once it is off... ")
+        print(f"\n  {'angle':>7}{'tau':>9}{'target':>9}{'present':>9}{'error':>9}")
+        for a, raw in plan:
+            present = hold_and_read(bus, args.id, raw, args.speed, args.settle)
+            err_deg = direction * (present - raw) / DEG   # +ve = lagging behind
+            rows.append((HIP_PITCH_TAU[a], err_deg))
+            print(f"  {a:>6}d{HIP_PITCH_TAU[a]:>9.3f}{raw:>9}{present:>9}"
+                  f"{err_deg:>8.2f}d")
     finally:
         try:
             bus.write1(args.id, REG_TORQUE, 0)
-            print("torque released")
+            print("\ntorque released")
         finally:
             bus.close()
+
+    if len(rows) < 4:
+        print("not enough points to fit")
+        return 1
+    taus = [t for t, _ in rows]
+    errs = [e for _, e in rows]
+    n = len(rows)
+    mt, me = sum(taus) / n, sum(errs) / n
+    sxx = sum((t - mt) ** 2 for t in taus)
+    sxy = sum((t - mt) * (e - me) for t, e in rows)
+    if abs(sxx) < 1e-12 or abs(sxy) < 1e-12:
+        print("degenerate fit -- the torque did not vary, or the joint did not move")
+        return 1
+    slope_deg_per_nm = sxy / sxx                       # deg per N.m
+    slope = slope_deg_per_nm * 3.14159265 / 180.0      # rad per N.m
+    kp = 1.0 / abs(slope)
+    resid = [e - (me + slope_deg_per_nm * (t - mt)) for t, e in rows]
+    rms = (sum(r * r for r in resid) / n) ** 0.5
+
+    print(f"\n  fit: error = tau/kp + offset over {n} points")
+    print(f"    slope     {slope_deg_per_nm:+.3f} deg per N.m   -> kp = {kp:.1f} N.m/rad")
+    print(f"    offset    {me - slope_deg_per_nm * mt:+.2f} deg   "
+          f"(friction and deadband; not part of kp)")
+    print(f"    residual  {rms:.2f} deg rms")
+    print(f"\n  the XML models kp = 50  ->  kp_scale = {kp / 50:.2f}")
+    if rms > 1.5:
+        print("  RESIDUAL IS HIGH -- the points do not lie on a line. Something")
+        print("  moved, or the joint hit a stop. Re-run before trusting kp.")
+    elif kp > 32:
+        print("  -> near the XML. Training should use kp_scale ~1.0.")
+    elif kp > 16:
+        print("  -> moderately soft.")
+    else:
+        print("  -> soft, consistent with the 6.3 deg open-loop crouch lean")
+        print("     measured by crouch_only. Training's 0.15-0.45 span is right.")
     return 0
 
 
