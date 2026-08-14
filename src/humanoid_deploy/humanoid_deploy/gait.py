@@ -85,8 +85,28 @@ class GaitConfig:
     #: Gait clock, from the bundle. Advanced once per control cycle.
     phase_increment: float = 0.0333333
 
-    #: Velocity command held in obs[50:53] for the whole walk.
+    #: Peak velocity command for obs[50:53]. Reached by ramping, not stepping.
     cmd_vx: float = 0.085
+    #: Seconds to ramp the velocity command between 0 and ``cmd_vx``.
+    #:
+    #: This is what makes the whole sequence work on a compliant robot. The
+    #: walking policy is trained with ``zero_cmd_prob`` > 0, so a zero command
+    #: is a behaviour it has: stand still, in the crouch, feet together. That
+    #: turns both handovers into something it already knows -- it takes the
+    #: robot at zero command, is asked to accelerate, and is brought back to
+    #: zero before the standing policy takes over. Nothing has to be blended
+    #: across a stride.
+    cmd_ramp_s: float = 1.0
+    #: Ramp the velocity command up *during* the descent into the crouch,
+    #: rather than holding zero until the crouch is reached.
+    #:
+    #: Off by default. It was added because no checkpoint could hold a zero
+    #: command at what was then believed to be the robot's stiffness (kp 10) --
+    #: but that stiffness figure turned out to be an artifact of a clamped
+    #: ankle, and at the real kp the crouch is stable and the zero-command hold
+    #: is the better design: the robot comes to a stop before either policy
+    #: changes hands. Turn it on only if a checkpoint again cannot hold still.
+    cmd_during_crouch: bool = False
     cmd_vy: float = 0.0
     cmd_wz: float = 0.0
 
@@ -115,7 +135,7 @@ class GaitConfig:
     #: falls over. The standing policy saturates fighting the descent it cannot
     #: see the reason for, and averaging a saturated controller with a pose
     #: target tracks neither. See tools/sim_handover.py --sweep crouch-style.
-    crouch_style: str = "ramp"
+    crouch_style: str = "blend_walk"
 
     #: How to get back:
     #:
@@ -157,6 +177,10 @@ class GaitConfig:
                                 "blend is a step change in every leg joint")
         if self.walk_duration_s <= 0.0:
             raise GaitError("walk_duration_s must be positive")
+        if self.cmd_ramp_s <= 0.0:
+            raise GaitError("cmd_ramp_s must be positive -- stepping the "
+                            "velocity command is a disturbance the policy has "
+                            "not seen")
         if self.crouch_style not in ("ramp", "blend_stand", "blend_walk"):
             raise GaitError(f"unknown crouch_style {self.crouch_style!r}")
         if self.recover_style not in ("blend", "freeze", "via_crouch"):
@@ -171,6 +195,8 @@ class GaitStatus:
     walk_authority: float
     #: Seconds left in the current mode, where that is meaningful.
     remaining_s: float
+    #: Velocity command actually applied this cycle, m/s.
+    cmd_vx: float = 0.0
     #: Set once a stop has been asked for but not yet begun.
     stop_reason: str | None = None
     #: True on the cycle the walking policy is handed the robot.
@@ -200,6 +226,8 @@ class GaitSequencer:
         self._walk_started = False
         #: Pose held at the moment a blend began, for the open-loop styles.
         self._blend_from: np.ndarray | None = None
+        #: Velocity command as a fraction of ``cmd_vx``, slewed not stepped.
+        self._cmd_scale = 0.0
         #: Reason the last walk ended, for the log.
         self.last_exit: str | None = None
 
@@ -214,6 +242,7 @@ class GaitSequencer:
         self._stop_waited = 0.0
         self._walk_started = False
         self._blend_from = None
+        self._cmd_scale = 0.0
         self.phase = 0.0
         return True, (f"crouching over {self.cfg.crouch_s:.1f}s, then walking "
                       f"{self.cfg.walk_duration_s:.1f}s at "
@@ -245,15 +274,36 @@ class GaitSequencer:
         True whenever its output is used -- which includes the descent under
         ``crouch_style='blend_walk'``, where it is already part of the blend.
         """
-        if self.mode is GaitMode.TO_CROUCH:
+        if self.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE):
             return self.cfg.crouch_style == "blend_walk"
         return self.mode in (GaitMode.WALK, GaitMode.TO_STAND)
 
     # -- the clock ---------------------------------------------------------
 
     def command(self) -> np.ndarray:
-        """The velocity command for obs[50:53]. Constant for the whole walk."""
-        return np.array([self.cfg.cmd_vx, self.cfg.cmd_vy, self.cfg.cmd_wz])
+        """The velocity command for obs[50:53], as ramped this cycle.
+
+        Zero everywhere except during the walk, and it slews between the two.
+        A step change in this input is a disturbance the policy only ever saw
+        at ``cmd_resample_s`` boundaries in training, and asking a compliant
+        robot to go from standing still to commanded speed in one cycle is the
+        kind of thing that shows up as a stumble on hardware and nowhere else.
+        """
+        return np.array([self._cmd_scale * self.cfg.cmd_vx,
+                         self.cfg.cmd_vy,
+                         self._cmd_scale * self.cfg.cmd_wz])
+
+    @property
+    def stopped(self) -> bool:
+        """True once the velocity command has been ramped all the way down."""
+        return self._cmd_scale <= 1e-6
+
+    def _slew_command(self, want: float, dt: float) -> None:
+        step = dt / max(self.cfg.cmd_ramp_s, 1e-6)
+        if want > self._cmd_scale:
+            self._cmd_scale = min(want, self._cmd_scale + step)
+        else:
+            self._cmd_scale = max(want, self._cmd_scale - step)
 
     def phase_features(self) -> np.ndarray:
         """``[sin(2*pi*phase), cos(2*pi*phase)]`` for obs[48:50]."""
@@ -289,6 +339,21 @@ class GaitSequencer:
         stand_target = np.asarray(stand_target, dtype=np.float64)
         started = finished = False
 
+        # The velocity command is full only while walking, and only while no
+        # stop is pending and there is more than one ramp left on the clock.
+        # Everywhere else it slews to zero, which for this policy means "stand
+        # still in the crouch" -- a behaviour it has, because the run that
+        # produced it used zero_cmd_prob 0.15.
+        want = 0.0
+        if self.mode is GaitMode.WALK and self._stop_reason is None:
+            left = self.cfg.walk_duration_s - self._elapsed
+            want = 0.0 if left <= self.cfg.cmd_ramp_s else 1.0
+        elif (self.cfg.cmd_during_crouch and self._stop_reason is None
+                and self.cfg.crouch_style == "blend_walk"
+                and self.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE)):
+            want = 1.0
+        self._slew_command(want, dt)
+
         if self.mode is GaitMode.STAND:
             target, authority, remaining = stand_target, 0.0, 0.0
 
@@ -319,17 +384,24 @@ class GaitSequencer:
                 # recover blend lift it out of a partial crouch.
                 self._enter_to_stand()
             elif alpha >= 1.0:
-                if self.cfg.crouch_style == "blend_walk":
-                    # The walking policy already has the robot; there is no
-                    # cold start to arrange and nothing to settle.
-                    self.mode, self._elapsed = GaitMode.WALK, 0.0
-                    self._walk_started = True
-                else:
-                    self.mode, self._elapsed = GaitMode.SETTLE, 0.0
+                self.mode, self._elapsed = GaitMode.SETTLE, 0.0
 
         elif self.mode is GaitMode.SETTLE:
             self._elapsed += dt
-            target, authority = self.nominal, 0.0
+            if self.cfg.crouch_style == "blend_walk":
+                # The walking policy owns the crouch, at zero command. It is
+                # the only controller trained around this pose, and at the
+                # robot's measured stiffness the crouch is NOT passively
+                # stable -- open loop it sags from 6.8 deg of lean to 23 deg
+                # in under a second. Something has to be holding it.
+                if walk_target is None:
+                    raise GaitError("crouch_style 'blend_walk' needs a walk "
+                                    "target in SETTLE")
+                target = np.asarray(walk_target, dtype=np.float64)
+                authority = 1.0
+                self.phase = (self.phase + self.cfg.phase_increment) % 1.0
+            else:
+                target, authority = self.nominal, 0.0
             remaining = max(0.0, self.cfg.settle_s - self._elapsed)
             if self._stop_reason is not None:
                 self._enter_to_stand()
@@ -339,8 +411,9 @@ class GaitSequencer:
                 # zeroes the walking policy's last_action on seeing
                 # walk_started, which is the remaining half of that definition.
                 self.mode, self._elapsed = GaitMode.WALK, 0.0
-                self.phase = 0.0
-                self._walk_started = started = True
+                if self.cfg.crouch_style != "blend_walk":
+                    self.phase = 0.0
+                    self._walk_started = started = True
 
         elif self.mode is GaitMode.WALK:
             if walk_target is None:
@@ -351,10 +424,14 @@ class GaitSequencer:
             remaining = max(0.0, self.cfg.walk_duration_s - self._elapsed)
             if self._elapsed >= self.cfg.walk_duration_s:
                 self.request_stop("walk duration reached")
+            # Begin slowing one ramp before the end, so the timer expiring and
+            # a Ctrl-C take the same path: command to zero, come to a stop,
+            # and only then hand the robot over.
             if self._stop_reason is not None:
                 self._stop_waited += dt
-                if (self._near_stop_phase()
-                        or self._stop_waited >= self.cfg.max_stop_wait_s):
+                if (self.stopped
+                        and (self._near_stop_phase()
+                             or self._stop_waited >= self.cfg.max_stop_wait_s)):
                     self._enter_to_stand()
 
         elif self.mode is GaitMode.TO_STAND:
@@ -412,6 +489,7 @@ class GaitSequencer:
             phase=self.phase,
             walk_authority=float(authority),
             remaining_s=float(remaining),
+            cmd_vx=float(self._cmd_scale * self.cfg.cmd_vx),
             stop_reason=self._stop_reason,
             walk_started=started,
             walk_finished=finished,

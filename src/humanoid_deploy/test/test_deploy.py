@@ -1125,8 +1125,10 @@ def test_the_full_sequence_visits_every_mode_and_returns_to_standing():
     assert seq.last_exit == "walk duration reached"
 
 
-def test_the_crouch_ends_exactly_on_the_nominal_pose():
-    seq = make_seq()
+def test_the_open_loop_crouch_ends_exactly_on_the_nominal_pose():
+    """Only the 'ramp' style targets the pose directly; blend_walk hands the
+    crouch to the walking policy, which holds it at zero command instead."""
+    seq = make_seq(crouch_style="ramp")
     seq.request_walk()
     last = None
     for target, status in drive(seq, 40):
@@ -1137,23 +1139,36 @@ def test_the_crouch_ends_exactly_on_the_nominal_pose():
 
 
 def test_the_walking_policy_is_told_when_its_cold_start_is():
-    """The node zeroes last_action on this flag; it must fire exactly once, on
-    the cycle the walking policy first has authority."""
-    seq = make_seq()
+    """The node zeroes last_action on this flag; under the open-loop crouch it
+    must fire exactly once, on the cycle the walking policy first has
+    authority. Under blend_walk there is no cold start to arrange -- the policy
+    has been driving since the descent -- so it must never fire."""
+    seq = make_seq(crouch_style="ramp")
     seq.request_walk()
     starts = [i for i, (_, s) in enumerate(drive(seq, 200)) if s.walk_started]
     assert len(starts) == 1
 
-
-def test_the_clock_only_runs_once_walking():
-    seq = make_seq()
+    seq = make_seq(crouch_style="blend_walk")
     seq.request_walk()
-    phases = []
-    for _, status in drive(seq, 40):
-        phases.append((status.mode, status.phase))
+    assert not any(s.walk_started for _, s in drive(seq, 200))
+
+
+def test_the_clock_is_frozen_until_the_walking_policy_has_the_robot():
+    seq = make_seq(crouch_style="ramp")
+    seq.request_walk()
+    phases = [(s.mode, s.phase) for _, s in drive(seq, 40)]
     assert all(p == 0.0 for mode, p in phases
                if mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE))
     assert any(p > 0.0 for mode, p in phases if mode is GaitMode.WALK)
+
+
+def test_under_blend_walk_the_clock_runs_from_the_descent():
+    """It has to: the walking policy is driving, and a frozen clock is an
+    input it has never seen."""
+    seq = make_seq(crouch_style="blend_walk")
+    seq.request_walk()
+    phases = [(s.mode, s.phase) for _, s in drive(seq, 30)]
+    assert any(p > 0.0 for mode, p in phases if mode is GaitMode.TO_CROUCH)
 
 
 def test_a_stop_request_returns_to_standing_early():
@@ -1168,9 +1183,8 @@ def test_a_stop_request_returns_to_standing_early():
 
 
 def test_stopping_during_the_crouch_abandons_it():
-    """Ctrl-C on the way down has no walking policy to hand back from, so it
-    goes straight to the standing policy."""
-    seq = make_seq()
+    """Ctrl-C on the way down goes straight back to the standing policy."""
+    seq = make_seq(crouch_style="ramp")
     seq.request_walk()
     drive(seq, 5)
     assert seq.mode is GaitMode.TO_CROUCH
@@ -1179,6 +1193,73 @@ def test_stopping_during_the_crouch_abandons_it():
     assert status.mode is GaitMode.TO_STAND
     modes = [s.mode for _, s in drive(seq, 60)]
     assert modes[-1] is GaitMode.STAND
+
+
+# ---- the velocity ramp ----------------------------------------------------
+
+
+def test_the_velocity_command_is_zero_once_the_walk_is_over():
+    """Whatever happens on the way in, the robot must be commanded to a stop
+    before the standing policy is handed it."""
+    seq = make_seq(cmd_ramp_s=0.2)
+    seq.request_walk()
+    for _, status in drive(seq, 200):
+        if status.mode in (GaitMode.TO_STAND, GaitMode.STAND):
+            assert status.cmd_vx == pytest.approx(0.0, abs=1e-9), status.mode
+
+
+def test_cmd_during_crouch_decides_whether_it_arrives_walking():
+    """Off, the robot holds the crouch at zero command before it walks. On, it
+    arrives already walking. Off is the better design; on is what the hardware
+    forces -- at the robot's measured stiffness no checkpoint can hold a zero
+    command for even 2 s."""
+    off = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=False)
+    off.request_walk()
+    assert all(s.cmd_vx == pytest.approx(0.0, abs=1e-9)
+               for _, s in drive(off, 40)
+               if s.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE))
+
+    on = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=True)
+    on.request_walk()
+    assert any(s.cmd_vx > 0.0 for _, s in drive(on, 40)
+               if s.mode is GaitMode.TO_CROUCH)
+
+
+def test_the_velocity_command_ramps_rather_than_steps():
+    seq = make_seq(cmd_ramp_s=0.4, walk_duration_s=3.0)
+    seq.request_walk()
+    series = [s.cmd_vx for _, s in drive(seq, 300)]
+    biggest = max(abs(b - a) for a, b in zip(series, series[1:]))
+    # one cycle of a 0.4 s ramp over the full command
+    assert biggest <= seq.cfg.cmd_vx * seq.cfg.control_dt / 0.4 + 1e-9
+    assert max(series) == pytest.approx(seq.cfg.cmd_vx)
+
+
+def test_it_comes_to_a_stop_before_handing_back():
+    """The whole point of zero_cmd_prob: the walking policy stops itself, so
+    the standing policy is never handed a robot mid-stride."""
+    seq = make_seq(cmd_ramp_s=0.4, walk_duration_s=3.0)
+    seq.request_walk()
+    entered = None
+    for _, status in drive(seq, 400):
+        if status.mode is GaitMode.TO_STAND and entered is None:
+            entered = status.cmd_vx
+    assert entered is not None
+    assert entered == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_stop_request_ramps_down_first():
+    seq = make_seq(cmd_ramp_s=0.4, walk_duration_s=60.0)
+    seq.request_walk()
+    drive(seq, 120)
+    assert seq.mode is GaitMode.WALK and seq.command()[0] > 0.0
+    seq.request_stop("Ctrl-C")
+    # it must not jump to TO_STAND on the next cycle
+    _, status = seq.step(STAND_TARGET, WALK_TARGET)
+    assert status.mode is GaitMode.WALK
+    modes = [s.mode for _, s in drive(seq, 200)]
+    assert modes[-1] is GaitMode.STAND
+    assert seq.last_exit == "Ctrl-C"
 
 
 def test_the_first_stop_reason_is_the_one_kept():
@@ -1211,7 +1292,7 @@ def test_walk_is_refused_while_already_walking():
 
 
 def test_the_walking_policy_is_only_evaluated_when_it_is_needed():
-    seq = make_seq()
+    seq = make_seq(crouch_style="ramp")
     assert not seq.walking
     seq.request_walk()
     drive(seq, 5)

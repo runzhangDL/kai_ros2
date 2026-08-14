@@ -56,13 +56,29 @@ class SimRobot:
     servos are perfect and the gait it learns is not executable.
     """
 
-    def __init__(self, xml, match_solver=True):
+    def __init__(self, xml, match_solver=True, kp_scale=1.0):
+        """
+        :param kp_scale: position-servo stiffness relative to the XML's kp=50.
+
+            1.0. A crouch_only run once settled at 5-6.5 deg of lean where kp 50
+            predicts 0.86, and that was read as the servos being 5x softer than
+            the model -- but the run still had the pre-campaign-8 nominal pose,
+            whose right_ankle_pitch clamps 2 deg short at the servo node. That
+            pose FALLS OVER in simulation at kp 50 with the clamp applied, so
+            the lean was the beginning of a fall and carried no stiffness
+            information. With the corrected pose the crouch settles at 0.9 deg
+            at kp 50, and the standing policy holds 0.5 deg on hardware against
+            2.6 in sim -- the robot behaves stiffer than the XML, not softer.
+
+            Pass 0.2 to re-check the pessimistic case; it is still wired up.
+        """
         import mujoco
         from mjx_walk_free_env import MuJoCoBipedWalkFreeMJX
 
         self.mujoco = mujoco
         env = MuJoCoBipedWalkFreeMJX(xml_path=xml, control_rate_hz=25.0,
-                                     actuator_model=True, obs_noise_scale=0.0)
+                                     actuator_model=True, obs_noise_scale=0.0,
+                                     kp_scale=kp_scale)
         self.nominal = np.asarray(env._nominal_np, dtype=np.float64)
         #: Base height with the legs crouched (the walking policy's pose) and
         #: with them straight (the standing policy's). These differ by 28 mm,
@@ -80,6 +96,12 @@ class SimRobot:
         self.frame_skip = int(env._n_frames)
 
         self.m = mujoco.MjModel.from_xml_path(xml)
+        # The env scaled ITS copy of the model; this is a fresh load and the
+        # physics actually run on this one, so it has to be scaled too. A
+        # `position` actuator carries kp in gainprm[0] and -kp in biasprm[1].
+        self.kp_scale = float(kp_scale)
+        self.m.actuator_gainprm[:, 0] *= self.kp_scale
+        self.m.actuator_biasprm[:, 1] *= self.kp_scale
         if match_solver:
             self.m.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
             self.m.opt.iterations, self.m.opt.ls_iterations = 1, 4
@@ -261,6 +283,9 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--xml", default="/home/run/Project/robot_mujoco/robot/robot.xml")
+    parser.add_argument("--kp-scale", type=float, default=0.20,
+                        help="servo stiffness vs the XML's kp=50. 0.20 = kp 10, "
+                             "which is what the robot measured at.")
     parser.add_argument("--stand-bundle", default=os.path.join(MODELS, "policy_bundle.npz"))
     parser.add_argument("--walk-bundle", default=os.path.join(MODELS, "walk_bundle.npz"))
     parser.add_argument("--crouch-s", type=float, default=2.0)
@@ -270,10 +295,15 @@ def main():
     parser.add_argument("--cmd-vx", type=float, default=0.085)
     parser.add_argument("--cmd-wz", type=float, default=0.0)
     parser.add_argument("--stop-phase", type=float, default=None)
-    parser.add_argument("--crouch-style", default="ramp",
+    # Default None, NOT the value they used to have. An argparse default here
+    # silently overrides GaitConfig's, so the tool would keep measuring a
+    # sequencer the robot does not run -- which is exactly what happened: the
+    # deployed default moved to blend_walk and this kept testing 'ramp'.
+    parser.add_argument("--crouch-style", default=None,
                         choices=("ramp", "blend_stand", "blend_walk"))
-    parser.add_argument("--recover-style", default="blend",
+    parser.add_argument("--recover-style", default=None,
                         choices=("blend", "freeze", "via_crouch"))
+    parser.add_argument("--cmd-ramp-s", type=float, default=None)
     parser.add_argument("--trials", type=int, default=40)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--sweep", choices=("none", "stop-phase", "recover",
@@ -285,10 +315,15 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(args.xml)))
     stand = Policy(args.stand_bundle)
     walk = Policy(args.walk_bundle)
+    print(f"kp    {args.kp_scale:.2f} x XML (kp {50 * args.kp_scale:.0f})")
+    _c = GaitConfig()
+    print(f"gait  crouch={args.crouch_style or _c.crouch_style} "
+          f"recover={args.recover_style or _c.recover_style} "
+          f"cmd_ramp={args.cmd_ramp_s or _c.cmd_ramp_s}s")
     print(f"stand {stand.describe().splitlines()[0]}")
     print(f"walk  {walk.describe().splitlines()[0]}")
 
-    robot = SimRobot(args.xml)
+    robot = SimRobot(args.xml, kp_scale=args.kp_scale)
     gait = walk.gait
     if np.max(np.abs(walk.default_pose - robot.nominal)) > 1e-6:
         raise SystemExit("the bundle's nominal pose disagrees with the env's")
@@ -303,9 +338,12 @@ def main():
             cmd_vx_range=tuple(gait["cmd_vx_range"]),
             cmd_wz_range=tuple(gait["cmd_wz_range"]),
             stop_phase=args.stop_phase,
-            crouch_style=args.crouch_style,
-            recover_style=args.recover_style,
         )
+        for name, value in (("crouch_style", args.crouch_style),
+                            ("recover_style", args.recover_style),
+                            ("cmd_ramp_s", args.cmd_ramp_s)):
+            if value is not None:
+                setattr(cfg, name, value)
         for key, value in over.items():
             setattr(cfg, key, value)
         cfg.validate()
