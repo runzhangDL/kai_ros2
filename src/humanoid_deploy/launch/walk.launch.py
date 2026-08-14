@@ -64,6 +64,14 @@ def generate_launch_description():
         # explicitly below, so it overrides the config file -- keep it at 0.0.
         DeclareLaunchArgument("control_rate_hz", default_value="0.0"),
         DeclareLaunchArgument("walk_duration_s", default_value="5.0"),
+        # Pitches the torso fore/aft in the crouch, to find the pose that
+        # actually balances on THIS robot. See walk_node's parameter docs --
+        # it belongs in training once found, not in the deployment.
+        DeclareLaunchArgument("ankle_pitch_trim_deg", default_value="0.0"),
+        # 1.0 = the trained crouch; smaller is shallower. A deep squat sends
+        # the hips backward, so this moves the CoM forward without needing to
+        # know which way the ankle trim leans.
+        DeclareLaunchArgument("crouch_scale", default_value="1.0"),
         # See the module docstring: leave this false and run imu.launch.py in
         # its own terminal for any run whose handback has to work.
         DeclareLaunchArgument("imu", default_value="false"),
@@ -101,7 +109,12 @@ def generate_launch_description():
                  "dry_run": LaunchConfiguration("dry_run"),
                  "control_rate_hz": LaunchConfiguration("control_rate_hz"),
                  "walk_duration_s": ParameterValue(
-                     LaunchConfiguration("walk_duration_s"), value_type=float)},
+                     LaunchConfiguration("walk_duration_s"), value_type=float),
+                 "ankle_pitch_trim_deg": ParameterValue(
+                     LaunchConfiguration("ankle_pitch_trim_deg"),
+                     value_type=float),
+                 "crouch_scale": ParameterValue(
+                     LaunchConfiguration("crouch_scale"), value_type=float)},
             ],
         ),
     ])

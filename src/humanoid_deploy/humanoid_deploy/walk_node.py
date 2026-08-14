@@ -99,6 +99,41 @@ class WalkPolicyNode(Node):
         # Ctrl-C -- with the walking policy's authority forced to zero, so the
         # robot never does anything but squat and stand up again.
         p("crouch_only", False)
+        # Per-joint offset added to the walking policy's nominal pose, degrees,
+        # in the bundle's joint order.
+        #
+        # This exists because the model and the robot disagree about where the
+        # centre of mass is. Measured 2026-08-14: held open loop in the crouch,
+        # every joint tracked its command to within 1.4 deg with ZERO drift,
+        # and the robot still rotated backward onto its heels, 6.1 deg growing
+        # to 14.8. Nothing mechanical -- the pose itself does not balance.
+        #
+        # Trimming ankle pitch pitches the torso relative to the feet and moves
+        # the CoM fore/aft. Use it with crouch_only to find the trim that makes
+        # the real robot stand upright in the crouch; that trim then belongs in
+        # NOMINAL_POSE_DEG and in training, not here. Left in the deployment it
+        # would offset every observation the policy sees from what it trained
+        # on, which is why it warns when set outside crouch_only.
+        p("nominal_trim_deg", [0.0] * 13)
+        # The ergonomic form of the same thing, and the only one usually
+        # needed: ankle pitch is what pitches the torso relative to the feet.
+        # Applied MIRRORED (+d to the left ankle, -d to the right) because the
+        # two joints have opposite sign conventions, so this is one physical
+        # direction of lean rather than a twist.
+        p("ankle_pitch_trim_deg", 0.0)
+        # Scale the whole nominal pose toward the standing pose. 1.0 = the
+        # trained crouch, 0.6 = a crouch 40% shallower, 0.0 = straight legs.
+        #
+        # Squatting with the torso vertical sends the hips BACKWARD as well as
+        # down, which is what walks the centre of mass toward the heels -- so a
+        # shallower crouch keeps it further forward. The pose's hip + knee +
+        # ankle sum to ~0 per leg, which is what keeps the torso vertical and
+        # the feet flat, and scaling is linear so it preserves that.
+        #
+        # Same caveat as the trim: this changes the pose the policy's residual
+        # is measured about, so it is a way to FIND a stable crouch under
+        # crouch_only, not a way to fly one.
+        p("crouch_scale", 1.0)
 
         stand_bundle = self.get_parameter("bundle").value
         walk_bundle = self.get_parameter("walk_bundle").value
@@ -151,6 +186,19 @@ class WalkPolicyNode(Node):
             raise SystemExit(f"gait configuration rejected: {exc}") from exc
         self.get_logger().info(self.seq.describe())
 
+        trim = list(self.get_parameter("nominal_trim_deg").value or [])
+        if not trim:
+            trim = [0.0] * self.walk.nu
+        ankle = float(self.get_parameter("ankle_pitch_trim_deg").value)
+        if abs(ankle) > 1e-9:
+            names = list(self.walk.joint_names)
+            trim[names.index("left_ankle_pitch_joint")] += ankle
+            trim[names.index("right_ankle_pitch_joint")] -= ankle
+        scale = float(self.get_parameter("crouch_scale").value)
+        if trim and len(trim) != self._nu_expected(self.walk):
+            raise SystemExit(
+                f"nominal_trim_deg has {len(trim)} entries, expected "
+                f"{self.walk.nu} (one per joint, in the bundle's order)")
         self.crouch_only = bool(self.get_parameter("crouch_only").value)
         if self.crouch_only:
             self.get_logger().warning(
@@ -158,6 +206,24 @@ class WalkPolicyNode(Node):
                 "published for inspection but given ZERO authority. The robot "
                 "will crouch, hold, and stand back up. Use this to verify the "
                 "sequence, the handback and Ctrl-C before trusting the gait.")
+
+        if abs(scale - 1.0) > 1e-9:
+            self.seq.nominal = self.seq.nominal * scale
+            self.get_logger().warning(
+                f"crouch SCALED to {scale:.2f} of the trained pose: "
+                + " ".join(f"{np.degrees(v):+.1f}" for v in self.seq.nominal))
+        if trim and np.any(np.abs(trim) > 1e-9):
+            self.seq.nominal = self.seq.nominal + np.radians(trim)
+            self.get_logger().warning(
+                "nominal pose TRIMMED by (deg): "
+                + " ".join(f"{v:+.1f}" for v in trim))
+            if not self.crouch_only:
+                self.get_logger().error(
+                    "  ...and crouch_only is FALSE. The walking policy's "
+                    "observations will be offset from the pose it was trained "
+                    "about by exactly this trim. Use a trim to FIND the "
+                    "balancing pose under crouch_only, then put it in "
+                    "NOMINAL_POSE_DEG and retrain -- do not fly it.")
 
         self._nu = self.stand.nu
         self._obs = np.zeros(self.walk.obs_size)
@@ -187,6 +253,10 @@ class WalkPolicyNode(Node):
             "gait node up, standing. Arm the executor, let it settle, then "
             "call:  ros2 service call /humanoid_policy/walk std_srvs/srv/Trigger")
         self._publish_gait()
+
+    @staticmethod
+    def _nu_expected(policy):
+        return policy.nu
 
     # -- startup checks ----------------------------------------------------
 
