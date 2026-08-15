@@ -50,8 +50,15 @@ from sts_tool import Bus, REG_PRESENT_POS, REG_TORQUE  # noqa: E402
 CPR = 4096
 DEG = CPR / 360.0
 
+# The live display ends in a carriage return with no newline, so it rewrites
+# one line in place. Flush explicitly rather than relying on the buffering mode
+# -- under `python3 -u` either mode happens to work, but that is luck.
+#
+# A static line here means the joint is not moving. It does NOT mean the tool
+# is hung, which is the reading it invites; hence the torque readback below and
+# the zero-travel warning at the end, so the two cases are told apart.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(write_through=True)
 
 
 def load_calibration():
@@ -117,12 +124,26 @@ def main():
 
     for sid in ids:
         bus.write1(sid, REG_TORQUE, 0)
-    print("torque off. Move each joint slowly to both ends of its travel.")
-    print("Ctrl-C when the numbers stop growing.\n")
+    # Read it back. A joint that silently stayed energised would look exactly
+    # like a joint nobody moved -- both report zero travel.
+    for sid in ids:
+        name, _, _ = cal[sid]
+        data = bus.read(sid, REG_TORQUE, 1)
+        if data is None:
+            print(f"  WARNING id{sid} {name}: no reply reading torque back")
+        elif data[0] != 0:
+            print(f"  WARNING id{sid} {name}: torque still reads {data[0]}, "
+                  f"the joint is NOT limp -- do not force it")
+        else:
+            print(f"  id{sid:>3} {name}: limp, confirmed")
+    print("\nNow move each joint SLOWLY by hand to both ends of its travel.")
+    print("The line below updates live -- if it does not move when you move")
+    print("the joint, stop and say so. Ctrl-C when min/max stop growing.\n")
 
     lo = {sid: None for sid in ids}
     hi = {sid: None for sid in ids}
     period = 1.0 / args.hz
+    last_beat = time.time()
     try:
         while True:
             line = []
@@ -138,13 +159,18 @@ def main():
                 hi[sid] = angle if hi[sid] is None else max(hi[sid], angle)
                 line.append(f"id{sid} {angle:+7.1f}  [{lo[sid]:+7.1f} .. "
                             f"{hi[sid]:+7.1f}]")
-            print("   ".join(line) + "        \r", end="")
+            print("   ".join(line) + "        \r", end="", flush=True)
+            # A scrolling record every 2 s, so there is still visible progress
+            # if the terminal or a pipe swallows the carriage return.
+            now = time.time()
+            if now - last_beat >= 2.0:
+                print()
+                last_beat = now
             time.sleep(period)
     except KeyboardInterrupt:
         print("\n")
 
-    print(f"{'joint':<24}{'id':>4}{'measured travel (deg)':>26}"
-          f"{'model says':>18}")
+    print(f"{'joint':<24}{'id':>4}{'measured travel (deg)':>30}")
     for sid in ids:
         name, _, _ = cal[sid]
         if lo[sid] is None:
@@ -153,6 +179,14 @@ def main():
         span = hi[sid] - lo[sid]
         print(f"{name:<24}{sid:>4}"
               f"{f'{lo[sid]:+.1f} .. {hi[sid]:+.1f}  (span {span:.1f})':>26}")
+    stuck = [sid for sid in ids
+             if lo[sid] is not None and hi[sid] - lo[sid] < 1.0]
+    if stuck:
+        names = ", ".join(cal[sid][0] for sid in stuck)
+        print(f"\n*** {names} did not move at all. That is not a measurement.")
+        print("    Either the joint was never moved by hand, or it is seized,")
+        print("    or the encoder is not reporting. Re-run and move it while")
+        print("    watching the live line.")
     print("\nTorque is still OFF -- the joints are limp. Keep the robot "
           "supported.\nNothing was written except torque=0; no position was "
           "ever commanded.")
