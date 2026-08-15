@@ -126,8 +126,22 @@ Terminal 3, once you are holding it:
 
 ```bash
 ros2 service call /humanoid_servo/arm  std_srvs/srv/Trigger    # it stands
+
+# CONFIRM it armed before going on -- expect state=running
+ros2 topic echo /humanoid_servo/status --once
+
 ros2 service call /humanoid_policy/walk std_srvs/srv/Trigger   # sequence starts
 ```
+
+The confirmation is not optional. On 2026-08-15 a run went through the whole
+sequence twice -- crouch, settle, walk at authority 1.00, handback -- with the
+servos disarmed the entire time, and every log line looked correct. `~/walk`
+now refuses when the state is not `running`, but check anyway.
+
+If `arm` is refused with a `qpos_N = ... sigma` message, the robot is resting
+in a pose the standing policy never saw in training. Stand it upright with the
+legs straight and call it again -- this happened on the first attempt with the
+right knee at 15.6 deg, and cleared on the second.
 
 Timeline, about 10 seconds end to end:
 

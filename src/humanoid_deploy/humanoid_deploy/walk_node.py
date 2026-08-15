@@ -235,11 +235,22 @@ class WalkPolicyNode(Node):
         self._warned_ood = False
         self._tilt_deg = 0.0
         self._cycles = 0
+        self._servo_state: str | None = None
 
         self.create_subscription(
             Imu, self.get_parameter("imu_topic").value, self._on_imu, _SENSOR_QOS)
         self.create_subscription(
             JointState, "/humanoid/joint_states", self._on_joints, _SENSOR_QOS)
+        # The executor's arm state, so ~/walk can refuse to start a walk that
+        # nothing is energised to perform. Measured 2026-08-15: a run with
+        # crouch_only:=false went through the whole sequence twice -- crouch,
+        # settle, walk at authority 1.0, handback -- with the servos disarmed
+        # the entire time. Every log line said it was working. The robot never
+        # moved, and the only evidence was `state=disarmed` in a different
+        # topic. Latched, so this arrives even if servo_node published it
+        # before this subscription existed.
+        self.create_subscription(
+            String, "/humanoid_servo/status", self._on_servo_status, _LATCHED)
         self._cmd_pub = self.create_publisher(JointState, "~/joint_command", _SENSOR_QOS)
         self._obs_pub = self.create_publisher(
             Float64MultiArray, "~/observation", _SENSOR_QOS)
@@ -434,11 +445,32 @@ class WalkPolicyNode(Node):
 
     # -- services ----------------------------------------------------------
 
+    def _on_servo_status(self, msg: String) -> None:
+        for field in msg.data.split():
+            if field.startswith("state="):
+                self._servo_state = field[len("state="):]
+                break
+
     def _srv_walk(self, request, response):
         del request
         limit = float(self.get_parameter("arm_tilt_deg").value)
         if self._imu_msg is None:
             response.success, response.message = False, "no IMU data yet"
+            return response
+        # Refuse before anything else moves: walking with torque off looks
+        # identical to walking in every log this node writes.
+        if self._servo_state is None:
+            response.success = False
+            response.message = ("no status from humanoid_servo yet -- cannot "
+                                "tell whether the servos are armed")
+            return response
+        if self._servo_state != "running":
+            response.success = False
+            response.message = (
+                f"servos are '{self._servo_state}', not 'running'. Hold the "
+                f"robot upright and call:  ros2 service call "
+                f"/humanoid_servo/arm std_srvs/srv/Trigger")
+            self.get_logger().error("walk refused: " + response.message)
             return response
         if self._tilt_deg > limit:
             response.success = False
