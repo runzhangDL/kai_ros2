@@ -6,9 +6,18 @@
 # validated with, and only the differences appear below.
 #
 # READ tools/sim_handover.py's output before raising walk_duration_s or
-# clearing crouch_only. As of the camp_E1 checkpoint the walking policy has a
-# measured failure pocket at +1.5 to +2.0 deg of initial pitch, and the crouch
-# settles at +1.53 deg. crouch_only defaults to TRUE for that reason.
+# clearing crouch_only.
+#
+# Current checkpoint: walk_bundle_F2b.npz (camp_F2.pkl.best). At the robot's
+# MEASURED stiffness (kp_scale 0.90) it survives the full sequence -- 30/30 at
+# a known start, 25-28/30 with the start pose perturbed, all failures inside
+# the walk phase -- and it DOES NOT WALK. Traced over 20 s of walk phase, x
+# oscillates around +0.058 m with +/-0.002 m amplitude: one lurch in the first
+# 1.5 s and then it rocks in place. Its own training log agrees, flagging the
+# checkpoint 'deploy if airborne > 0.15' against a measured 0.035.
+#
+# So this config is a full-pipeline rehearsal, not a walk. crouch_only defaults
+# to TRUE and there is no checkpoint yet that justifies clearing it.
 # =============================================================================
 
 /humanoid_servo:
@@ -61,16 +70,21 @@
     # statically stable, symmetric squat -- it does not need a balance
     # controller to reach, it needs to be reached slowly.
     crouch_style: ramp
-    # blend | freeze. 'blend' keeps both policies live so the walking policy
-    # finishes its stride instead of parking a swing foot in the air.
-    recover_style: blend
+    # blend | freeze | via_crouch. MEASURED on camp_F2 over the robustness
+    # sweep: via_crouch 30/30, 30/30, 30/30, 29/30; blend 0/30, failing every
+    # single time in the handback with tilt running 9.3 -> 37 deg in two
+    # seconds. Settling the stride back into the static crouch before standing
+    # up out of it is what the robot can actually do.
+    recover_style: via_crouch
 
     # ---- the velocity command ---------------------------------------------
-    # obs[50:53]. The trained range is [0.05, 0.12] m/s: cmd_vx = 0 was NEVER
-    # trained (zero_cmd_prob defaulted to 0 and the campaign did not raise it),
-    # so zero is not a stop command and the node refuses it. Stopping is what
-    # the TO_STAND blend is for. Note the checkpoint does not track this
-    # command anyway -- it walks at ~0.036 m/s whatever it is told.
+    # obs[50:53]. This bundle's range is [0.0, 0.12] m/s -- camp_F2 ran with
+    # zero_cmd_prob 0.15, so unlike earlier checkpoints zero IS a trained
+    # behaviour ('stand still in the crouch') and the node accepts it. That is
+    # what makes the cmd_ramp and the via_crouch handback work.
+    #
+    # The checkpoint does not track this command at all: commanded 0.085, it
+    # nets ~0.000 m/s over a 20 s walk. Changing it will not make it move.
     cmd_vx: 0.085
     cmd_wz: 0.0
 

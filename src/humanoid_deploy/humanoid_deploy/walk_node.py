@@ -82,7 +82,7 @@ class WalkPolicyNode(Node):
         p("walk_duration_s", 5.0)
         p("recover_s", 2.0)
         p("crouch_style", "ramp")
-        p("recover_style", "blend")
+        p("recover_style", "via_crouch")
         p("cmd_vx", 0.085)
         p("cmd_wz", 0.0)
         p("stop_phase", -1.0)           # <0 means "no phase preference"

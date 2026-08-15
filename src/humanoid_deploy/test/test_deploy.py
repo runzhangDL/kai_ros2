@@ -1210,19 +1210,35 @@ def test_the_velocity_command_is_zero_once_the_walk_is_over():
 
 def test_cmd_during_crouch_decides_whether_it_arrives_walking():
     """Off, the robot holds the crouch at zero command before it walks. On, it
-    arrives already walking. Off is the better design; on is what the hardware
-    forces -- at the robot's measured stiffness no checkpoint can hold a zero
-    command for even 2 s."""
-    off = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=False)
-    off.request_walk()
-    assert all(s.cmd_vx == pytest.approx(0.0, abs=1e-9)
-               for _, s in drive(off, 40)
-               if s.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE))
+    arrives already walking.
 
-    on = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=True)
+    Off is the better design and is the default. It also takes BOTH flags: the
+    command only ramps during the descent under crouch_style 'blend_walk',
+    because that is the only crouch style in which the walking policy has any
+    authority on the way down. Under 'ramp' -- the default, and the style that
+    measured best -- the descent is open loop, so a nonzero command would be
+    handed to a policy that is not driving anything.
+    """
+    for style in ("ramp", "blend_walk"):
+        off = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=False,
+                       crouch_style=style)
+        off.request_walk()
+        assert all(s.cmd_vx == pytest.approx(0.0, abs=1e-9)
+                   for _, s in drive(off, 40)
+                   if s.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE)), style
+
+    on = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=True,
+                  crouch_style="blend_walk")
     on.request_walk()
     assert any(s.cmd_vx > 0.0 for _, s in drive(on, 40)
                if s.mode is GaitMode.TO_CROUCH)
+
+    # ...and it stays at zero under the open-loop crouch even when asked for.
+    moot = make_seq(cmd_ramp_s=0.2, cmd_during_crouch=True, crouch_style="ramp")
+    moot.request_walk()
+    assert all(s.cmd_vx == pytest.approx(0.0, abs=1e-9)
+               for _, s in drive(moot, 40)
+               if s.mode in (GaitMode.TO_CROUCH, GaitMode.SETTLE))
 
 
 def test_the_velocity_command_ramps_rather_than_steps():

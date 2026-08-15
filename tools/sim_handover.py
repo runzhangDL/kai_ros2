@@ -246,7 +246,7 @@ def run_once(robot, stand, walk, cfg, hold_s=4.0, trace=False,
         min_height = min(min_height, robot.height)
         if trace:
             rows.append((t, status.mode.value, status.phase, robot.tilt_deg,
-                         robot.height, status.walk_authority))
+                         robot.height, status.walk_authority) + robot.travel)
         if fell_in is None and (robot.height < FALL_HEIGHT_M
                                 or robot.tilt_deg > FALL_TILT_DEG):
             # "stand" spans two very different situations -- the settled pose
@@ -283,9 +283,14 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--xml", default="/home/run/Project/robot_mujoco/robot/robot.xml")
-    parser.add_argument("--kp-scale", type=float, default=0.20,
-                        help="servo stiffness vs the XML's kp=50. 0.20 = kp 10, "
-                             "which is what the robot measured at.")
+    parser.add_argument("--kp-scale", type=float, default=0.90,
+                        help="servo stiffness vs the XML's kp=50. 0.90 = kp 45, "
+                             "which is what the robot measured at: 44.9 N.m/rad "
+                             "by tools/measure_kp.py, 0.65 deg residual over a "
+                             "7-point gravity-loaded hip sweep. The old 0.20 "
+                             "default came from a comparison against the "
+                             "standing policy, which is closed loop and hides "
+                             "stiffness -- do not go back to it.")
     parser.add_argument("--stand-bundle", default=os.path.join(MODELS, "policy_bundle.npz"))
     parser.add_argument("--walk-bundle", default=os.path.join(MODELS, "walk_bundle.npz"))
     parser.add_argument("--crouch-s", type=float, default=2.0)
@@ -355,7 +360,7 @@ def main():
         ok = summarise("full sequence", result)
         print("\n  mode timeline (tilt deg, height m):")
         last = None
-        for t, mode, phase, tilt, height, authority in result["trace"]:
+        for t, mode, phase, tilt, height, authority, tx, ty in result["trace"]:
             if mode != last:
                 print(f"    {t:6.2f}s  -> {mode:<10} tilt {tilt:5.1f}  "
                       f"h {height:.3f}  walk authority {authority:.2f}")

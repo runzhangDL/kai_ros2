@@ -64,6 +64,11 @@ def generate_launch_description():
         # explicitly below, so it overrides the config file -- keep it at 0.0.
         DeclareLaunchArgument("control_rate_hz", default_value="0.0"),
         DeclareLaunchArgument("walk_duration_s", default_value="5.0"),
+        # true (the config default): the whole sequence runs with the walking
+        # policy evaluated and published but given ZERO authority -- the robot
+        # squats and stands up again. Everything except the gait is exercised.
+        # Pass crouch_only:=false to give the walking policy the robot.
+        DeclareLaunchArgument("crouch_only", default_value="true"),
         # Pitches the torso fore/aft in the crouch, to find the pose that
         # actually balances on THIS robot. See walk_node's parameter docs --
         # it belongs in training once found, not in the deployment.
@@ -114,7 +119,9 @@ def generate_launch_description():
                      LaunchConfiguration("ankle_pitch_trim_deg"),
                      value_type=float),
                  "crouch_scale": ParameterValue(
-                     LaunchConfiguration("crouch_scale"), value_type=float)},
+                     LaunchConfiguration("crouch_scale"), value_type=float),
+                 "crouch_only": ParameterValue(
+                     LaunchConfiguration("crouch_only"), value_type=bool)},
             ],
         ),
     ])

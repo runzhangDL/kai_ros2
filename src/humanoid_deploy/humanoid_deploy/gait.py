@@ -135,7 +135,7 @@ class GaitConfig:
     #: falls over. The standing policy saturates fighting the descent it cannot
     #: see the reason for, and averaging a saturated controller with a pose
     #: target tracks neither. See tools/sim_handover.py --sweep crouch-style.
-    crouch_style: str = "blend_walk"
+    crouch_style: str = "ramp"
 
     #: How to get back:
     #:
@@ -145,11 +145,16 @@ class GaitConfig:
     #:                 swing foot in the air for the duration.
     #: ``via_crouch``  reverse the entry: settle the walk into the static
     #:                 crouch over the first half, then stand up out of it over
-    #:                 the second. The crouch is passively stable, so this puts
-    #:                 the robot somewhere it can simply be left before asking
-    #:                 the standing policy -- which has never seen a walking
-    #:                 robot -- to take it over.
-    recover_style: str = "blend"
+    #:                 the second. DEFAULT, and measured: with camp_F2 it gives
+    #:                 30/30, 30/30, 30/30, 29/30 across the robustness sweep
+    #:                 where ``blend`` gives 0/30, failing every time in the
+    #:                 handback with tilt going 9.3 -> 37 deg over two seconds.
+    #:
+    #:                 An earlier note here said via_crouch was the worst of the
+    #:                 three, at 3/20. That measurement was taken against a
+    #:                 different checkpoint at kp_scale 0.20 -- a stiffness the
+    #:                 robot turned out not to have -- and it does not hold.
+    recover_style: str = "via_crouch"
 
     def validate(self) -> None:
         lo, hi = self.cmd_vx_range
